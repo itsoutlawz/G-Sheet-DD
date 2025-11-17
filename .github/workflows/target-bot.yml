@@ -1,4 +1,4 @@
-name: "DDD Online Bot"
+name: "DamDama Targe Bot"
 on:
   schedule:
     - cron: '*/10 * * * *'
@@ -71,6 +71,7 @@ jobs:
           SHEET_WRITE_DELAY: '1.2'
         run: |
           python Scraper.py
+
 
 
 
