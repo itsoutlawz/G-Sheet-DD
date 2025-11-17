@@ -274,23 +274,56 @@ class Sheets:
                 self.dashboard.clear(); self.dashboard.append_row(expected)
         except Exception as e:
             log_msg(f"Dashboard setup failed: {e}")
-        self._format(); self._load_existing()
+        self._format(); self._load_existing(); self.normalize_target_statuses()
 
     def _get_or_create(self,name,cols=20,rows=1000):
         try: return self.ss.worksheet(name)
         except gspread.exceptions.WorksheetNotFound:
             return self.ss.add_worksheet(title=name, rows=rows, cols=cols)
 
+    def _apply_banding(self, sheet, end_col, start_row=1):
+        try:
+            end_col=max(end_col,1)
+            req={
+                "addBanding":{
+                    "bandedRange":{
+                        "range":{
+                            "sheetId":sheet.id,
+                            "startRowIndex":start_row,
+                            "startColumnIndex":0,
+                            "endColumnIndex":end_col
+                        },
+                        "rowProperties":{
+                            "headerColor":{"red":1.0,"green":0.6,"blue":0.0},
+                            "firstBandColor":{"red":1.0,"green":0.98,"blue":0.95},
+                            "secondBandColor":{"red":1.0,"green":1.0,"blue":1.0}
+                        }
+                    }
+                }
+            }
+            self.ss.batch_update({"requests":[req]})
+        except Exception as e:
+            log_msg(f"Banding failed: {e}")
+
     def _format(self):
         try:
             self.ws.format("A:R", {"backgroundColor":{"red":1,"green":1,"blue":1},"textFormat":{"fontFamily":"Bona Nova SC","fontSize":8,"bold":False}})
             self.ws.format("A1:R1", {"textFormat":{"bold":False,"fontSize":9,"fontFamily":"Bona Nova SC"},"horizontalAlignment":"CENTER","backgroundColor":{"red":1.0,"green":0.6,"blue":0.0}})
-            try:
-                req={"addBanding":{"bandedRange":{"range":{"sheetId":self.ws.id,"startRowIndex":1,"startColumnIndex":0,"endColumnIndex":len(COLUMN_ORDER)},"rowProperties":{"headerColor":{"red":1.0,"green":0.6,"blue":0.0},"firstBandColor":{"red":1.0,"green":0.98,"blue":0.95},"secondBandColor":{"red":1.0,"green":1.0,"blue":1.0}}}}}
-                self.ss.batch_update({"requests":[req]})
-            except: pass
+            self._apply_banding(self.ws, len(COLUMN_ORDER), start_row=1)
         except Exception as e:
             log_msg(f"Format failed: {e}")
+        try:
+            self.target.format("A:D", {"textFormat":{"fontFamily":"Bona Nova SC","fontSize":8,"bold":False}})
+            self.target.format("A1:D1", {"textFormat":{"bold":True,"fontSize":9,"fontFamily":"Bona Nova SC"},"horizontalAlignment":"CENTER","backgroundColor":{"red":1.0,"green":0.6,"blue":0.0}})
+            self._apply_banding(self.target, self.target.col_count, start_row=1)
+        except Exception as e:
+            log_msg(f"Target format failed: {e}")
+        try:
+            self.dashboard.format("A:K", {"textFormat":{"fontFamily":"Bona Nova SC","fontSize":8,"bold":False}})
+            self.dashboard.format("A1:K1", {"textFormat":{"bold":True,"fontSize":9,"fontFamily":"Bona Nova SC"},"horizontalAlignment":"CENTER","backgroundColor":{"red":1.0,"green":0.6,"blue":0.0}})
+            self._apply_banding(self.dashboard, self.dashboard.col_count, start_row=1)
+        except Exception as e:
+            log_msg(f"Dashboard format failed: {e}")
 
     def _load_existing(self):
         self.existing={}
@@ -346,6 +379,30 @@ class Sheets:
         except Exception as e:
             log_msg(f"Dashboard update failed: {e}")
 
+    def normalize_target_statuses(self):
+        try:
+            vals=self.target.get_all_values()
+            if not vals or len(vals)<2: return
+            updates=[]
+            for idx,row in enumerate(vals[1:],start=2):
+                if len(row)<2: continue
+                status=row[1].strip()
+                lower=status.lower()
+                new_status=None
+                if ("pending" in lower) or ("⚡" in status):
+                    if status!="⚡ Pending": new_status="⚡ Pending"
+                elif ("done" in lower) or ("complete" in lower) or ("✅" in status):
+                    if status!="Done 💀": new_status="Done 💀"
+                elif status:
+                    new_status="⚡ Pending"
+                if new_status:
+                    updates.append((idx,new_status))
+            for row_idx,val in updates:
+                self.target.update(values=[[val]], range_name=f"B{row_idx}")
+                time.sleep(SHEET_WRITE_DELAY)
+        except Exception as e:
+            log_msg(f"Normalize statuses failed: {e}")
+
     def write_profile(self, profile:dict, old_row:int|None=None):
         nickname=(profile.get("NICK NAME") or "").strip()
         if not nickname: return {"status":"error","error":"Missing nickname","changed_fields":[]}
@@ -387,7 +444,7 @@ def get_pending_targets(sheets:Sheets):
         status=(row[1] if len(row)>1 else '').strip()
         source=(row[3] if len(row)>3 else 'Target').strip() or 'Target'
         norm=status.lower()
-        is_pending=(norm=="pending" or "pending" in norm or "⚡" in status)
+        is_pending=(not status) or ("pending" in norm) or ("⚡" in status)
         if nick and is_pending:
             out.append({'nickname':nick,'row':idx,'source':source})
     return out
@@ -531,43 +588,60 @@ def main():
         if MAX_PROFILES_PER_RUN>0: targets=targets[:MAX_PROFILES_PER_RUN]
         success=failed=0
         run_stats={"new":0,"updated":0,"unchanged":0}
-        for i,t in enumerate(targets,1):
-            nick=t['nickname']; row=t['row']; source=t.get('source','Target') or 'Target'
-            log_msg(f"[{i}/{len(targets)}] {nick}")
-            try:
-                prof=scrape_profile(driver, nick)
-                if not prof:
-                    raise RuntimeError("Profile scrape failed")
-                prof['SOURCE']=source
-                result=sheets.write_profile(prof, old_row=row)
-                status=result.get("status","error") if result else "error"
-                if status in {"new","updated","unchanged"}:
-                    success+=1
-                    run_stats[status]+=1
-                    changed_fields=result.get("changed_fields",[]) if result else []
-                    cleaned=[field for field in changed_fields if field not in HIGHLIGHT_EXCLUDE_COLUMNS]
-                    if status=="new":
-                        remark_detail="New target profile added"
-                    elif status=="updated":
-                        if cleaned:
-                            trimmed=cleaned[:5]
-                            if len(cleaned)>5: trimmed.append("…")
-                            remark_detail=f"Updated: {', '.join(trimmed)}"
+        start_time=time.time(); run_started=get_pkt_time()
+        trigger_type="Scheduled" if os.getenv('GITHUB_EVENT_NAME','').lower()=='schedule' else "Manual"
+        current_target=None
+        try:
+            for i,t in enumerate(targets,1):
+                current_target=t
+                nick=t['nickname']; row=t['row']; source=t.get('source','Target') or 'Target'
+                eta=calculate_eta(i-1, len(targets), start_time)
+                log_msg(f"[{i}/{len(targets)} | ETA {eta}] {nick}")
+                try:
+                    prof=scrape_profile(driver, nick)
+                    if not prof:
+                        raise RuntimeError("Profile scrape failed")
+                    prof['SOURCE']=source
+                    result=sheets.write_profile(prof, old_row=row)
+                    status=result.get("status","error") if result else "error"
+                    if status in {"new","updated","unchanged"}:
+                        success+=1
+                        run_stats[status]+=1
+                        changed_fields=result.get("changed_fields",[]) if result else []
+                        cleaned=[field for field in changed_fields if field not in HIGHLIGHT_EXCLUDE_COLUMNS]
+                        if status=="new":
+                            remark_detail="New target profile added"
+                        elif status=="updated":
+                            if cleaned:
+                                trimmed=cleaned[:5]
+                                if len(cleaned)>5: trimmed.append("…")
+                                remark_detail=f"Updated: {', '.join(trimmed)}"
+                            else:
+                                remark_detail="Updated (no key changes)"
                         else:
-                            remark_detail="Updated (no key changes)"
+                            remark_detail="No data changes"
+                        sheets.update_target_status(row, "Done 💀", f"{remark_detail} @ {get_pkt_time().strftime('%I:%M %p')}")
+                        log_msg(f"✅ {nick} {status}")
                     else:
-                        remark_detail="No data changes"
-                    sheets.update_target_status(row, "Done 💀", f"{remark_detail} @ {get_pkt_time().strftime('%I:%M %p')}")
-                    log_msg(f"✅ {nick} {status}")
-                else:
-                    raise RuntimeError(result.get("error","Write failed") if result else "Write failed")
-            except Exception as e:
-                sheets.update_target_status(row, "⚡ Pending", f"Retry needed: {e}")
-                failed+=1
-                log_msg(f"❌ {nick} failed: {e}")
-            if BATCH_SIZE>0 and i% BATCH_SIZE==0 and i<len(targets):
-                log_msg("Batch cool-off"); adaptive.on_batch(); time.sleep(3)
-            adaptive.sleep()
+                        raise RuntimeError(result.get("error","Write failed") if result else "Write failed")
+                except Exception as e:
+                    sheets.update_target_status(row, "⚡ Pending", f"Retry needed: {e}")
+                    failed+=1
+                    log_msg(f"❌ {nick} failed: {e}")
+                current_target=None
+                if BATCH_SIZE>0 and i% BATCH_SIZE==0 and i<len(targets):
+                    log_msg("Batch cool-off"); adaptive.on_batch(); time.sleep(3)
+                adaptive.sleep()
+        except KeyboardInterrupt:
+            print("\n⚠️ Run interrupted by user")
+            if current_target:
+                sheets.update_target_status(current_target['row'], "⚡ Pending", f"Interrupted @ {get_pkt_time().strftime('%I:%M %p')}")
+            return
+        except Exception as fatal:
+            print(f"\n❌ Fatal error: {fatal}")
+            if current_target:
+                sheets.update_target_status(current_target['row'], "⚡ Pending", f"Run error: {fatal}")
+            return
         print("\n✅ Done")
         sheets.update_dashboard({
             "Run Number":1,
@@ -578,8 +652,8 @@ def main():
             "New Profiles": run_stats.get('new',0),
             "Updated Profiles": run_stats.get('updated',0),
             "Unchanged Profiles": run_stats.get('unchanged',0),
-            "Trigger": ("Scheduled" if os.getenv('GITHUB_EVENT_NAME','').lower()=='schedule' else "Manual"),
-            "Start": get_pkt_time().strftime("%d-%b-%y %I:%M %p"),
+            "Trigger": trigger_type,
+            "Start": run_started.strftime("%d-%b-%y %I:%M %p"),
             "End": get_pkt_time().strftime("%d-%b-%y %I:%M %p"),
         })
     finally:
