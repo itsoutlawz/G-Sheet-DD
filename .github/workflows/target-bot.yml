@@ -1,23 +1,23 @@
 name: "DamDama Targe Bot"
 on:
   schedule:
-    - cron: '*/45 * * * *'
+    - cron: '*/59 * * * *'
     
   workflow_dispatch:
     inputs:
       max_profiles:
         description: 'Max Profiles (0 = unlimited)'
         required: false
-        default: '0'
+        default: '100'
       batch_size:
         description: 'Batch Size'
         required: false
-        default: '10'
+        default: '20'
         
 jobs:
  run-jobs:
     runs-on: ubuntu-latest
-    timeout-minutes: 44
+    timeout-minutes: 58
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,14 +63,15 @@ jobs:
           DAMADAM_USERNAME_2: ${{ secrets.DAMADAM_USERNAME_2 }}
           DAMADAM_PASSWORD_2: ${{ secrets.DAMADAM_PASSWORD_2 }}
           GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
-          MAX_PROFILES_PER_RUN: ${{ github.event.inputs.max_profiles || '200' }}
+          MAX_PROFILES_PER_RUN: ${{ github.event.inputs.max_profiles || '100' }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '20' }}
           MIN_DELAY: '0.4'
           MAX_DELAY: '0.5'
           PAGE_LOAD_TIMEOUT: '30'
-          SHEET_WRITE_DELAY: '1.1'
+          SHEET_WRITE_DELAY: '2.0'
         run: |
           python Scraper.py
+
 
 
 
