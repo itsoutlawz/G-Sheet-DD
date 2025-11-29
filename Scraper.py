@@ -412,10 +412,9 @@ class Sheets:
             if not v:
                 continue
             c=COLUMN_TO_INDEX[col]; cell=f"{column_letter(c)}{row_idx}"
-            if col=="IMAGE": fml=f'=IMAGE("{v}", 4, 50, 50)'
-            elif col=="LAST POST": fml=f'=HYPERLINK("{v}", "Post")'
-            else: fml=f'=HYPERLINK("{v}", "Profile")'
-            self.ws.update(values=[[fml]], range_name=cell, value_input_option='USER_ENTERED'); time.sleep(SHEET_WRITE_DELAY)
+            # Store raw URL instead of formula
+            self.ws.update(values=[[v]], range_name=cell, value_input_option='USER_ENTERED')
+            time.sleep(SHEET_WRITE_DELAY)
 
     def _highlight(self,row_idx,indices):
         for idx in indices:
@@ -674,7 +673,7 @@ def main():
         targets=get_pending_targets(sheets)
         if not targets: print("No pending targets."); return
         if MAX_PROFILES_PER_RUN>0: targets=targets[:MAX_PROFILES_PER_RUN]
-        success=failed=0
+        success=failed=suspended_count=0
         run_stats={"new":0,"updated":0,"unchanged":0}
         start_time=time.time(); run_started=get_pkt_time()
         trigger_type="Scheduled" if os.getenv('GITHUB_EVENT_NAME','').lower()=='schedule' else "Manual"
@@ -691,8 +690,10 @@ def main():
                         raise RuntimeError("Profile scrape failed")
                     prof['SOURCE']=source
                     if prof.get('SUSPENSION_REASON'):
+                        sheets.write_profile(prof, old_row=row)
                         reason=prof['SUSPENSION_REASON']
                         sheets.update_target_status(row, "Suspended", f"Suspended: {reason} @ {get_pkt_time().strftime('%I:%M %p')}")
+                        suspended_count+=1
                         log_msg(f"⚠️ {nick} skipped (suspended: {reason})")
                     else:
                         result=sheets.write_profile(prof, old_row=row)
@@ -749,6 +750,8 @@ def main():
             "Start": run_started.strftime("%d-%b-%y %I:%M %p"),
             "End": get_pkt_time().strftime("%d-%b-%y %I:%M %p"),
         })
+        if suspended_count:
+            print(f"   ⚠️ Suspended skipped: {suspended_count}")
     finally:
         try: driver.quit()
         except: pass
