@@ -406,11 +406,27 @@ class Sheets:
         except Exception as e:
             log_msg(f"Tags load failed: {e}")
 
+    def _clean_url(self, url):
+        if not url or not isinstance(url, str):
+            return url
+        # Convert /content/.../g/ to /comments/image/...
+        if '/content/' in url and '/g/' in url:
+            try:
+                # Extract the ID
+                id_part = url.split('/content/')[-1].split('/')[0]
+                return f'https://damadam.pk/comments/image/{id_part}'
+            except (IndexError, AttributeError):
+                return url
+        return url
+
     def _update_links(self,row_idx,data):
         for col in LINK_COLUMNS:
             v = data.get(col)
             if not v:
                 continue
+            # Clean the URL if it's an image URL
+            if col == 'LAST POST' and '/content/' in str(v) and '/g/' in str(v):
+                v = self._clean_url(v)
             c=COLUMN_TO_INDEX[col]; cell=f"{column_letter(c)}{row_idx}"
             # Store raw URL instead of formula
             self.ws.update(values=[[v]], range_name=cell, value_input_option='USER_ENTERED')
