@@ -313,7 +313,7 @@ class Sheets:
         self.tags_mapping={}
         self.ws=self._get_or_create("ProfilesTarget", cols=len(COLUMN_ORDER))
         self.target=self._get_or_create("Target", cols=4)
-        self.tags_sheet=self._get_sheet_if_exists("Tags", cols=4)
+        self.tags_sheet=self._get_sheet_if_exists("Tags")
         # Ensure headers for ProfilesTarget
         try:
             vals = self.ws.get_all_values()
@@ -811,6 +811,7 @@ def main():
 
 if __name__=='__main__':
     main()
+
 
 
 
