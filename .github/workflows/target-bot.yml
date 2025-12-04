@@ -1,23 +1,23 @@
-name: "DamDama Target Bot 💫"
+name: "DamDama Target Bot ✨"
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # Har 4 ghantay, bilkul HH:00 par
+    - cron: '0 */1 * * *'   # Har 1 ghantay, bilkul HH:00 par
   workflow_dispatch:
     inputs:
       max_profiles:
         description: 'Max Profiles (0 = unlimited)'
         required: false
-        default: '150'
+        default: '0'
       batch_size:
         description: 'Batch Size'
         required: false
-        default: '20'
+        default: '10'
 
 jobs:
   run-jobs:
     runs-on: ubuntu-latest
-    timeout-minutes: 58
+    timeout-minutes: 59
 
     steps:
       - name: Checkout
@@ -64,14 +64,15 @@ jobs:
           DAMADAM_USERNAME_2: ${{ secrets.DAMADAM_USERNAME_2 }}
           DAMADAM_PASSWORD_2: ${{ secrets.DAMADAM_PASSWORD_2 }}
           GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
-          MAX_PROFILES_PER_RUN: ${{ github.event.inputs.max_profiles != '' && github.event.inputs.max_profiles || '150' }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size != '' && github.event.inputs.batch_size || '20' }}
-          MIN_DELAY: '0.4'
-          MAX_DELAY: '0.5'
+          MAX_PROFILES_PER_RUN: ${{ github.event.inputs.max_profiles != '' && github.event.inputs.max_profiles || '0' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size != '' && github.event.inputs.batch_size || '00' }}
+          MIN_DELAY: '0.3'
+          MAX_DELAY: '0.4'
           PAGE_LOAD_TIMEOUT: '30'
-          SHEET_WRITE_DELAY: '1.5'
+          SHEET_WRITE_DELAY: '2.5'
         run: |
           python Scraper.py
+
 
 
 
