@@ -131,17 +131,15 @@ def to_absolute_url(href:str)->str:
 
 def get_friend_status(driver) -> str:
     try:
-        page = driver.page_source.lower()  // poora html lowercase
+        page = driver.page_source.lower()  
 
-        // Agar follow.svg mil raha ho to user abhi follow nahi kiya hua
         if '/static/img/follow.svg' in page:
             return "No"
 
-        // Agar unfollow/remove button ho to already following
         if 'action="/follow/remove/' in page:
             return "Yes"
 
-        return ""   // kuch na mila to blank
+        return ""
     except Exception:
         return ""
 
@@ -780,6 +778,7 @@ def main():
 
 if __name__=='__main__':
     main()
+
 
 
 
