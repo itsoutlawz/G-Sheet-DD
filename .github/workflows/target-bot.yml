@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */1 * * *'   # Every hour at HH:00
+    - cron: '0 */2 * * *'   # Every 2 at HH:00
   workflow_dispatch:
     inputs:
       max_profiles:
@@ -88,4 +88,5 @@ jobs:
           # Run the bot
           python Scraper.py
           
+
           echo "✅ Bot completed successfully"
