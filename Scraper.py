@@ -384,6 +384,29 @@ class Sheets:
             else:
                 log_msg(f"Banding failed: {e}")
 
+    def _set_column_widths(self, sheet, col_widths):
+        """Set column widths using batch_update API (compatible with all gspread versions)"""
+        try:
+            requests = []
+            for col_letter, width in col_widths.items():
+                col_idx = ord(col_letter.upper()) - ord('A')
+                requests.append({
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet.id,
+                            "dimension": "COLUMNS",
+                            "startIndex": col_idx,
+                            "endIndex": col_idx + 1
+                        },
+                        "properties": {"pixelSize": width},
+                        "fields": "pixelSize"
+                    }
+                })
+            if requests:
+                self.ss.batch_update({"requests": requests})
+        except Exception as e:
+            log_msg(f"Set column widths failed: {e}")
+
     def _format(self):
 
         # ---------------- PROFILES TARGET ----------------
@@ -393,8 +416,7 @@ class Sheets:
                 "G": 100, "H": 60, "I": 60, "J": 40, "K": 70, "L": 40,
                 "M": 50, "N": 50, "O": 50, "P": 250, "Q": 50, "R": 120
             }
-            for col, w in col_widths.items():
-                self.ws.set_column_width(col, w)
+            self._set_column_widths(self.ws, col_widths)
 
             self.ws.format(
                 "A:R",
@@ -422,8 +444,7 @@ class Sheets:
         # ---------------- TARGET SHEET ----------------
         try:
             col_widths = {"A":250, "B":110, "C":280, "D":80, "E":90}
-            for col, w in col_widths.items():
-                self.target.set_column_width(col, w)
+            self._set_column_widths(self.target, col_widths)
 
             self.target.format(
                 "A:E",
@@ -454,8 +475,7 @@ class Sheets:
                 "A":40, "B":130, "C":50, "D":50, "E":50,
                 "F":50, "G":50, "H":50, "I":60, "J":120, "K":120
             }
-            for col, w in col_widths.items():
-                self.dashboard.set_column_width(col, w)
+            self._set_column_widths(self.dashboard, col_widths)
 
             self.dashboard.format(
                 "A:K",
@@ -484,8 +504,7 @@ class Sheets:
         try:
             if self.tags_sheet:
                 col_widths = {"A":150, "B":150, "C":150, "D":150}
-                for col, width in col_widths.items():
-                    self.tags_sheet.set_column_width(col, width)
+                self._set_column_widths(self.tags_sheet, col_widths)
 
                 self.tags_sheet.format(
                     "A:D",
