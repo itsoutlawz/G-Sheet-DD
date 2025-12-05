@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */2 * * *'   # Every 2 at HH:00
+    - cron: '0 */1 * * *'   # Every 1 at HH:00
   workflow_dispatch:
     inputs:
       max_profiles:
@@ -19,9 +19,9 @@ on:
 env:
   PYTHON_VERSION: '3.10'
   MIN_DELAY: '0.5'
-  MAX_DELAY: '1.0'
+  MAX_DELAY: '0.7'
   PAGE_LOAD_TIMEOUT: '30'
-  SHEET_WRITE_DELAY: '2.0'
+  SHEET_WRITE_DELAY: '1.0'
 
 jobs:
   run-bot:
@@ -90,3 +90,4 @@ jobs:
           
 
           echo "✅ Bot completed successfully"
+
