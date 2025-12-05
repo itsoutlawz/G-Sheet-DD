@@ -1,6 +1,5 @@
 name: "DamDama Target Bot ✨"
 
-# Only trigger on push to main or manually
 on:
   push:
     branches: [ main ]
@@ -17,7 +16,6 @@ on:
         required: false
         default: '10'
 
-# Environment variables available to all jobs in the workflow
 env:
   PYTHON_VERSION: '3.10'
   MIN_DELAY: '0.3'
@@ -31,62 +29,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 59
     
-    # Job-level environment variables
-    env:
-      DAMADAM_USERNAME: ${{ secrets.DAMADAM_USERNAME }}
-      DAMADAM_PASSWORD: ${{ secrets.DAMADAM_PASSWORD }}
-      DAMADAM_USERNAME_2: ${{ secrets.DAMADAM_USERNAME_2 }}
-      DAMADAM_PASSWORD_2: ${{ secrets.DAMADAM_PASSWORD_2 }}
-      GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
-      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-      MAX_PROFILES_PER_RUN: ${{ github.event.inputs.max_profiles || '0' }}
-      BATCH_SIZE: ${{ github.event.inputs.batch_size || '10' }}
-      
-    # Check if required secrets are set
-    if: |
-      secrets.DAMADAM_USERNAME != '' && 
-      secrets.DAMADAM_PASSWORD != '' && 
-      secrets.GOOGLE_SHEET_URL != '' && 
-      secrets.GOOGLE_CREDENTIALS_JSON != ''
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      - name: Setup Chromedriver
-        uses: nanasess/setup-chromedriver@v2
-
-      - name: Prepare Google Credentials
-        if: env.GOOGLE_SHEET_URL != ''
+      - name: Run bot
+        env:
+          DAMADAM_USERNAME: ${{ secrets.DAMADAM_USERNAME }}
+          DAMADAM_PASSWORD: ${{ secrets.DAMADAM_PASSWORD }}
+          DAMADAM_USERNAME_2: ${{ secrets.DAMADAM_USERNAME_2 || '' }}
+          DAMADAM_PASSWORD_2: ${{ secrets.DAMADAM_PASSWORD_2 || '' }}
+          GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          MAX_PROFILES: ${{ github.event.inputs.max_profiles || '0' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '10' }}
         run: |
-          if [ -z "$GOOGLE_CREDENTIALS_JSON" ]; then
-            echo "❌ GOOGLE_SHEET_URL is set but GOOGLE_CREDENTIALS_JSON is missing."
+          if [ -z "$DAMADAM_USERNAME" ] || [ -z "$DAMADAM_PASSWORD" ] || [ -z "$GOOGLE_SHEET_URL" ] || [ -z "$GOOGLE_CREDENTIALS_JSON" ]; then
+            echo "❌ Error: Required environment variables are not set"
             exit 1
           fi
-          echo "$GOOGLE_CREDENTIALS_JSON" > google_credentials.json
-          chmod 600 google_credentials.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/google_credentials.json" >> $GITHUB_ENV
-        env:
-          GITHUB_WORKSPACE: ${{ github.workspace }}
-
-      - name: Run Target Bot
-        env:
-          # These are already defined at the job level, but can be overridden here if needed
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
-        run: |
+          
+          # Create credentials file
+          echo "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+          
+          # Run the bot
           python Scraper.py
