@@ -313,7 +313,9 @@ class Sheets:
         self.client=client; self.ss=client.open_by_url(SHEET_URL)
         self.tags_mapping={}
         self.ws=self._get_or_create("ProfilesTarget", cols=len(COLUMN_ORDER), rows=10000)
+        self._ensure_sheet_size(self.ws, 10000)  # Resize if needed
         self.target=self._get_or_create("Target", cols=4, rows=5000)
+        self._ensure_sheet_size(self.target, 5000)  # Resize if needed
         self.tags_sheet=self._get_sheet_if_exists("Tags")
         # Ensure headers for ProfilesTarget
         try:
@@ -343,6 +345,16 @@ class Sheets:
         except Exception as e:
             log_msg(f"Dashboard setup failed: {e}")
         self._format(); self._load_existing(); self._load_tags_mapping(); self.normalize_target_statuses()
+
+    def _ensure_sheet_size(self, sheet, required_rows):
+        """Resize sheet if current rows < required rows"""
+        try:
+            if sheet.row_count < required_rows:
+                log_msg(f"Resizing {sheet.title}: {sheet.row_count} -> {required_rows} rows")
+                self.ss.batch_update({"requests": [{"updateSheetProperties": {"fields": "gridProperties.rowCount", "properties": {"gridProperties": {"rowCount": required_rows}, "sheetId": sheet.id}}}]})
+                time.sleep(1)
+        except Exception as e:
+            log_msg(f"Sheet resize failed: {e}")
 
     def _get_or_create(self,name,cols=20,rows=10000):
         try: return self.ss.worksheet(name)
