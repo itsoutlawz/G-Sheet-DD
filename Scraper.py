@@ -383,65 +383,130 @@ class Sheets:
             else:
                 log_msg(f"Banding failed: {e}")
 
-def _format(self):
-    # ========== SHEET: ProfilesTarget ==========
-    try:
-        # Column widths
-        prof_cols = {
-            "A": 50,   # IMAGE
-            "B": 160,  # NICK NAME
-            "C": 140,  # TAGS
-            "D": 250,  # LAST POST
-            "E": 100,  # LAST POST TIME
-            "F": 60,   # FRIEND
-            "G": 100,  # CITY
-            "H": 60,   # GENDER
-            "I": 60,   # MARRIED
-            "J": 40,   # AGE
-            "K": 70,   # JOINED
-            "L": 40,   # FOLLOWERS
-            "M": 50,   # STATUS
-            "N": 50,   # POSTS
-            "O": 50,   # PROFILE LINK
-            "P": 250,  # INTRO
-            "Q": 50,   # SOURCE
-            "R": 120   # DATETIME SCRAP
-        }
+        def _format(self):
 
-        for col, width in prof_cols.items():
-            self.ws.set_column_width(col, width)
-
-        # Body format
-        self.ws.format(
-            "A:R",
-            {
-                "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-                "textFormat": {"fontFamily": "Asimovian", "fontSize": 8},
-                "horizontalAlignment": "LEFT",
-                "verticalAlignment": "MIDDLE",
-                "wrapStrategy": "CLIP"
+        # --- ProfilesTarget SHEET ---
+        try:
+            # Column widths
+            col_widths = {
+                "A": 50, "B": 160, "C": 140, "D": 250, "E": 100, "F": 60,
+                "G": 100, "H": 60, "I": 60, "J": 40, "K": 70, "L": 40,
+                "M": 50, "N": 50, "O": 50, "P": 250, "Q": 50, "R": 120
             }
-        )
+            for col, w in col_widths.items():
+                self.ws.set_column_width(col, w)
 
-        # Special Clip/Warp rules
-        self.ws.format("B:B", {"wrapStrategy": "WRAP"})   # Nick Name
-        self.ws.format("D:D", {"wrapStrategy": "CLIP"})   # Last Post
-        self.ws.format("P:P", {"wrapStrategy": "CLIP"})   # Intro
+            # Alignment block
+            self.ws.format(
+                "A:R",
+                {
+                    "backgroundColor": {"red":1,"green":1,"blue":1},
+                    "textFormat": {"fontFamily":"Asimovian", "fontSize":8},
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE"
+                }
+            )
+            self.ws.format(
+                "A1:R1",
+                {
+                    "textFormat": {"bold": True, "fontSize": 9, "fontFamily":"Asimovian"},
+                    "horizontalAlignment": "CENTER",
+                    "backgroundColor": {"red":1.0,"green":0.7,"blue":0.2}
+                }
+            )
+            self._apply_banding(self.ws, len(COLUMN_ORDER), start_row=0)
+        except Exception as e:
+            log_msg(f"ProfilesTarget format failed: {e}")
 
-        # Header
-        self.ws.format(
-            "A1:R1",
-            {
-                "textFormat": {"bold": True, "fontSize": 9, "fontFamily": "Asimovian"},
-                "horizontalAlignment": "CENTER",
-                "backgroundColor": {"red": 1.0, "green": 0.7, "blue": 0.2}
+
+        # --- Target SHEET ---
+        try:
+            col_widths = {"A":250, "B":110, "C":280, "D":80, "E":90}
+            for col, w in col_widths.items():
+                self.target.set_column_width(col, w)
+
+            self.target.format(
+                "A:E",
+                {
+                    "backgroundColor":{"red":1,"green":1,"blue":1},
+                    "textFormat":{"fontFamily":"Asimovian","fontSize":8},
+                    "horizontalAlignment":"CENTER",
+                    "verticalAlignment":"MIDDLE"
+                }
+            )
+            self.target.format(
+                "A1:E1",
+                {
+                    "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
+                    "horizontalAlignment":"CENTER",
+                    "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
+                }
+            )
+            self._apply_banding(self.target, self.target.col_count, start_row=0)
+        except Exception as e:
+            log_msg(f"Target format failed: {e}")
+
+
+        # --- Dashboard SHEET ---
+        try:
+            col_widths = {
+                "A":40, "B":130, "C":50, "D":50, "E":50,
+                "F":50, "G":50, "H":50, "I":60, "J":120, "K":120
             }
-        )
+            for col, w in col_widths.items():
+                self.dashboard.set_column_width(col, w)
 
-        self._apply_banding(self.ws, len(prof_cols), start_row=1)
+            self.dashboard.format(
+                "A:K",
+                {
+                    "backgroundColor":{"red":1,"green":1,"blue":1},
+                    "textFormat":{"fontFamily":"Asimovian","fontSize":8},
+                    "horizontalAlignment":"CENTER",
+                    "verticalAlignment":"MIDDLE"
+                }
+            )
+            self.dashboard.format(
+                "A1:K1",
+                {
+                    "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
+                    "horizontalAlignment":"CENTER",
+                    "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
+                }
+            )
+            self._apply_banding(self.dashboard, self.dashboard.col_count, start_row=0)
+        except Exception as e:
+            log_msg(f"Dashboard format failed: {e}")
 
-    except Exception as e:
-        log_msg(f"ProfilesTarget format failed: {e}")
+
+        # --- Tags SHEET ---
+        try:
+            if self.tags_sheet:
+                col_widths = {"A":150, "B":150, "C":150, "D":150}
+                for col, width in col_widths.items():
+                    self.tags_sheet.set_column_width(col, width)
+
+                self.tags_sheet.format(
+                    "A:D",
+                    {
+                        "backgroundColor":{"red":1,"green":1,"blue":1},
+                        "textFormat":{"fontFamily":"Asimovian","fontSize":8},
+                        "horizontalAlignment":"CENTER",
+                        "verticalAlignment":"MIDDLE"
+                    }
+                )
+                self.tags_sheet.format(
+                    "A1:D1",
+                    {
+                        "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
+                        "horizontalAlignment":"CENTER",
+                        "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
+                    }
+                )
+                self._apply_banding(self.tags_sheet, self.tags_sheet.col_count, start_row=0)
+
+        except Exception as e:
+            log_msg(f"Tags format failed: {e}")
+
 
 
     # ========== SHEET: Target ==========
@@ -974,6 +1039,7 @@ def main():
 
 if __name__=='__main__':
     main()
+
 
 
 
