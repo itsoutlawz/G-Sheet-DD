@@ -662,28 +662,37 @@ class Sheets:
             if c=="IMAGE": v=""
             elif c=="PROFILE LINK": v="Profile" if profile.get(c) else ""
             elif c=="LAST POST": v="Post" if profile.get(c) else ""
+            elif c=="FRIEND": v=profile.get(c,"")  # Don't clean FRIEND status
             else: v=clean_data(profile.get(c,""))
             vals.append(v)
         key=nickname.lower(); ex=self.existing.get(key)
         if ex:
             before={COLUMN_ORDER[i]:(ex['data'][i] if i<len(ex['data']) else "") for i in range(len(COLUMN_ORDER))}
             changed=[i for i,col in enumerate(COLUMN_ORDER) if col not in HIGHLIGHT_EXCLUDE_COLUMNS and (before.get(col,"") or "") != (vals[i] or "")]
-            self.ws.insert_row(vals,2); self._update_links(2, profile)
-            if changed:
-                if ENABLE_CELL_HIGHLIGHT:
-                    self._highlight(2,changed)
-                self._add_notes(2,changed,before,vals)
+            # Delete old row first
             try:
-                old=ex['row']+1 if ex['row']>=2 else 3; self.ws.delete_rows(old)
+                self.ws.delete_rows(ex['row'])
             except Exception as e:
                 log_msg(f"Old row delete failed: {e}")
-            self.existing[key]={'row':2,'data':vals}
+            # Append new row at end
+            self.ws.append_row(vals); self._update_links(self.ws.row_count, profile)
+            if changed:
+                if ENABLE_CELL_HIGHLIGHT:
+                    self._highlight(self.ws.row_count,changed)
+                self._add_notes(self.ws.row_count,changed,before,vals)
+            self.existing[key]={'row':self.ws.row_count,'data':vals}
             status="updated" if changed else "unchanged"
             result={"status":status,"changed_fields":[COLUMN_ORDER[i] for i in changed]}
         else:
-            self.ws.insert_row(vals,2); self._update_links(2, profile); self.existing[key]={'row':2,'data':vals}
+            # Append new row at end
+            self.ws.append_row(vals); self._update_links(self.ws.row_count, profile); self.existing[key]={'row':self.ws.row_count,'data':vals}
             result={"status":"new","changed_fields":list(COLUMN_ORDER)}
         time.sleep(SHEET_WRITE_DELAY)
+        # Reapply banding to show alternating colors
+        try:
+            self._apply_banding(self.ws, len(COLUMN_ORDER), start_row=0)
+        except:
+            pass
         return result
 
 # Target processing
