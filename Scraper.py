@@ -1,14 +1,53 @@
-#!/usr/bin/env python4
+#!/usr/bin/env python3
 """
 DamaDam Target Bot - Single File v3.2.1
-- Processes targets from Target sheet (only "⚡ Pending" and variants)
-- Writes results to ProfilesTarget
-- Inserts new/updated rows at Row 2; highlights and annotates changed cells
-- On failure/cancel, reverts target status to "⚡ Pending" with remark
-- Adaptive delay to avoid Google API rate limits
+
+OVERVIEW:
+  Automated bot to scrape DamaDam user profiles and store results in Google Sheets.
+  Runs locally on Windows 10 or via GitHub Actions (scheduled every 1 hour).
+
+WORKFLOW:
+  1. Reads pending targets from 'Target' sheet (status: Pending or empty)
+  2. Logs into DamaDam using provided credentials
+  3. Scrapes profile data (gender, city, posts, followers, etc.)
+  4. Appends new profiles to last row in 'ProfilesTarget' sheet
+  5. Updates target status to 'Done' on success or 'Pending' on failure
+  6. Applies Quantico font formatting to all data
+
+KEY FEATURES:
+  - Batch processing with adaptive delays to avoid API rate limits
+  - Handles suspended/unverified accounts gracefully
+  - Cookie-based session persistence
+  - Google Sheets API integration with error recovery
+  - Comprehensive logging with timestamps
+  - Windows 10 compatible (no emoji encoding issues)
+
+CONFIGURATION:
+  Environment variables (see README.md):
+    - DAMADAM_USERNAME, DAMADAM_PASSWORD (local defaults: 0utLawZ / asdasd)
+    - GOOGLE_SHEET_URL, GOOGLE_APPLICATION_CREDENTIALS
+    - MAX_PROFILES_PER_RUN, BATCH_SIZE, MIN_DELAY, MAX_DELAY, etc.
+
+SCHEDULE:
+  GitHub Actions: Every 1 hour (0 */1 * * *)
+  Local: Run manually with: python Scraper.py
 """
+
+# ==================== IMPORTS & CONFIG ====================
+
+# === DEMO HARDCODED CREDENTIALS (for local test only, REMOVE before GitHub push!)
+DAMADAM_USERNAME = "0utLawZ"
+DAMADAM_PASSWORD = "asdasd"
+GOOGLE_CREDENTIALS_JSON = "credentials.json"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jn1DroWU8GB5Sc1rQ7wT-WusXK9v4V05ISYHgUEjYZc/edit"
+
 import os, sys, re, time, json, random
 from datetime import datetime, timedelta, timezone
+from colorama import Fore, Style, init as colorama_init
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+colorama_init(autoreset=True)
+console = Console()
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -25,11 +64,11 @@ LOGIN_URL = "https://damadam.pk/login/"
 HOME_URL = "https://damadam.pk/"
 COOKIE_FILE = "damadam_cookies.pkl"
 
-USERNAME = os.getenv('DAMADAM_USERNAME', '')
-PASSWORD = os.getenv('DAMADAM_PASSWORD', '')
+
+USERNAME = os.getenv('DAMADAM_USERNAME', '0utLawZ')  # Default for local testing
+PASSWORD = os.getenv('DAMADAM_PASSWORD', 'asdasd')  # Default for local testing
 USERNAME_2 = os.getenv('DAMADAM_USERNAME_2', '')
 PASSWORD_2 = os.getenv('DAMADAM_PASSWORD_2', '')
-SHEET_URL = os.getenv('GOOGLE_SHEET_URL', '')
 GOOGLE_CREDENTIALS_RAW = os.getenv('GOOGLE_CREDENTIALS_JSON', '')
 
 MAX_PROFILES_PER_RUN = int(os.getenv('MAX_PROFILES_PER_RUN', '0'))
@@ -40,9 +79,8 @@ PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '30'))
 SHEET_WRITE_DELAY = float(os.getenv('SHEET_WRITE_DELAY', '1.0'))
 
 COLUMN_ORDER = [
-    "IMAGE", "NICK NAME", "TAGS", "LAST POST", "LAST POST TIME", "FRIEND", "CITY",
-    "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS",
-    "POSTS", "PROFILE LINK", "INTRO", "SOURCE", "DATETIME SCRAP"
+    "ID", "NICK NAME", "TAGS", "FRIEND", "CITY", "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS", "POSTS", "INTRO", "SOURCE", "DATETIME SCRAP",
+    "LAST POST", "LAST POST TIME", "IMAGE", "PROFILE LINK", "POST URL"
 ]
 COLUMN_TO_INDEX = {name: idx for idx, name in enumerate(COLUMN_ORDER)}
 COLUMN_TLOG_HEADERS = ["Timestamp", "Nickname", "Change Type", "Fields", "Before", "After"]
@@ -58,7 +96,7 @@ SUSPENSION_INDICATORS = [
 ]
 ENABLE_CELL_HIGHLIGHT = False
 
-# Helpers
+# ==================== HELPERS (TIME / TEXT / URL) ====================
 
 def get_pkt_time():
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)
@@ -240,13 +278,14 @@ class AdaptiveDelay:
 
 adaptive=AdaptiveDelay(MIN_DELAY,MAX_DELAY)
 
-# Browser & Auth
+# ==================== BROWSER & LOGIN ====================
 
 def setup_browser():
     try:
         opts=Options(); opts.add_argument("--headless=new"); opts.add_argument("--window-size=1920,1080"); opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option('excludeSwitches',['enable-automation']); opts.add_experimental_option('useAutomationExtension',False)
         opts.add_argument("--no-sandbox"); opts.add_argument("--disable-dev-shm-usage"); opts.add_argument("--disable-gpu")
+        opts.add_argument("--log-level=3")  # Suppress DevTools/Chrome noise
         driver=webdriver.Chrome(options=opts); driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
         driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         return driver
@@ -292,24 +331,32 @@ def login(driver)->bool:
     except Exception as e:
         log_msg(f"Login error: {e}"); return False
 
-# Google Sheets
+# ==================== GOOGLE SHEETS ====================
 
 def gsheets_client():
-    if not SHEET_URL: print("❌ GOOGLE_SHEET_URL is not set."); sys.exit(1)
+    if not GOOGLE_SHEET_URL:
+        print("[ERROR] GOOGLE_SHEET_URL is not set."); sys.exit(1)
     scope=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
-    gac=os.getenv('GOOGLE_APPLICATION_CREDENTIALS','').strip()
+    # DEMO: Always use file if GOOGLE_CREDENTIALS_JSON is a file
     try:
-        if gac and os.path.exists(gac): cred=Credentials.from_service_account_file(gac, scopes=scope)
+        if os.path.exists(GOOGLE_CREDENTIALS_JSON):
+            cred=Credentials.from_service_account_file(GOOGLE_CREDENTIALS_JSON, scopes=scope)
         else:
-            if not GOOGLE_CREDENTIALS_RAW: print("❌ GOOGLE_SHEET_URL is set but GOOGLE_CREDENTIALS_JSON is missing."); sys.exit(1)
-            cred=Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_RAW), scopes=scope)
+            # fallback to env var if not found
+            gac=os.getenv('GOOGLE_APPLICATION_CREDENTIALS','').strip()
+            if gac and os.path.exists(gac):
+                cred=Credentials.from_service_account_file(gac, scopes=scope)
+            else:
+                if not GOOGLE_CREDENTIALS_RAW:
+                    print("[ERROR] GOOGLE_SHEET_URL is set but GOOGLE_CREDENTIALS_JSON is missing."); sys.exit(1)
+                cred=Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_RAW), scopes=scope)
         return gspread.authorize(cred)
     except Exception as e:
-        print(f"❌ Google auth failed: {e}"); sys.exit(1)
+        print(f"[ERROR] Google auth failed: {e}"); sys.exit(1)
 
 class Sheets:
     def __init__(self, client):
-        self.client=client; self.ss=client.open_by_url(SHEET_URL)
+        self.client=client; self.ss=client.open_by_url(GOOGLE_SHEET_URL)
         self.tags_mapping={}
         self.ws=self._get_or_create("ProfilesTarget", cols=len(COLUMN_ORDER))
         self.target=self._get_or_create("Target", cols=4)
@@ -384,130 +431,7 @@ class Sheets:
                 log_msg(f"Banding failed: {e}")
 
     def _format(self):
-
-        # ---------------- PROFILES TARGET ----------------
-        try:
-            col_widths = {
-                "A": 50, "B": 160, "C": 140, "D": 250, "E": 100, "F": 60,
-                "G": 100, "H": 60, "I": 60, "J": 40, "K": 70, "L": 40,
-                "M": 50, "N": 50, "O": 50, "P": 250, "Q": 50, "R": 120
-            }
-            for col, w in col_widths.items():
-                self.ws.set_column_width(col, w)
-
-            self.ws.format(
-                "A:R",
-                {
-                    "backgroundColor": {"red":1,"green":1,"blue":1},
-                    "textFormat": {"fontFamily":"Asimovian", "fontSize":8},
-                    "horizontalAlignment": "CENTER",
-                    "verticalAlignment": "MIDDLE"
-                }
-            )
-            self.ws.format(
-                "A1:R1",
-                {
-                    "textFormat": {"bold": True, "fontSize": 9, "fontFamily":"Asimovian"},
-                    "horizontalAlignment": "CENTER",
-                    "backgroundColor": {"red":1.0,"green":0.7,"blue":0.2}
-                }
-            )
-            self._apply_banding(self.ws, len(COLUMN_ORDER), start_row=0)
-
-        except Exception as e:
-            log_msg(f"ProfilesTarget format failed: {e}")
-
-
-        # ---------------- TARGET SHEET ----------------
-        try:
-            col_widths = {"A":250, "B":110, "C":280, "D":80, "E":90}
-            for col, w in col_widths.items():
-                self.target.set_column_width(col, w)
-
-            self.target.format(
-                "A:E",
-                {
-                    "backgroundColor":{"red":1,"green":1,"blue":1},
-                    "textFormat":{"fontFamily":"Asimovian","fontSize":8},
-                    "horizontalAlignment":"CENTER",
-                    "verticalAlignment":"MIDDLE"
-                }
-            )
-            self.target.format(
-                "A1:E1",
-                {
-                    "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
-                    "horizontalAlignment":"CENTER",
-                    "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
-                }
-            )
-            self._apply_banding(self.target, self.target.col_count, start_row=0)
-
-        except Exception as e:
-            log_msg(f"Target format failed: {e}")
-
-
-        # ---------------- DASHBOARD SHEET ----------------
-        try:
-            col_widths = {
-                "A":40, "B":130, "C":50, "D":50, "E":50,
-                "F":50, "G":50, "H":50, "I":60, "J":120, "K":120
-            }
-            for col, w in col_widths.items():
-                self.dashboard.set_column_width(col, w)
-
-            self.dashboard.format(
-                "A:K",
-                {
-                    "backgroundColor":{"red":1,"green":1,"blue":1},
-                    "textFormat":{"fontFamily":"Asimovian","fontSize":8},
-                    "horizontalAlignment":"CENTER",
-                    "verticalAlignment":"MIDDLE"
-                }
-            )
-            self.dashboard.format(
-                "A1:K1",
-                {
-                    "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
-                    "horizontalAlignment":"CENTER",
-                    "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
-                }
-            )
-            self._apply_banding(self.dashboard, self.dashboard.col_count, start_row=0)
-
-        except Exception as e:
-            log_msg(f"Dashboard format failed: {e}")
-
-
-        # ---------------- TAGS SHEET ----------------
-        try:
-            if self.tags_sheet:
-                col_widths = {"A":150, "B":150, "C":150, "D":150}
-                for col, width in col_widths.items():
-                    self.tags_sheet.set_column_width(col, width)
-
-                self.tags_sheet.format(
-                    "A:D",
-                    {
-                        "backgroundColor":{"red":1,"green":1,"blue":1},
-                        "textFormat":{"fontFamily":"Asimovian","fontSize":8},
-                        "horizontalAlignment":"CENTER",
-                        "verticalAlignment":"MIDDLE"
-                    }
-                )
-                self.tags_sheet.format(
-                    "A1:D1",
-                    {
-                        "textFormat":{"bold":True,"fontSize":9,"fontFamily":"Asimovian"},
-                        "horizontalAlignment":"CENTER",
-                        "backgroundColor":{"red":1.0,"green":0.7,"blue":0.2}
-                    }
-                )
-                self._apply_banding(self.tags_sheet, self.tags_sheet.col_count, start_row=0)
-
-        except Exception as e:
-            log_msg(f"Tags format failed: {e}")
-
+        pass  # Formatting disabled as per user request
 
     def _load_existing(self):
         self.existing={}
@@ -566,7 +490,10 @@ class Sheets:
                 v = self._clean_url(v)
             c=COLUMN_TO_INDEX[col]; cell=f"{column_letter(c)}{row_idx}"
             # Store raw URL instead of formula
-            self.ws.update(values=[[v]], range_name=cell, value_input_option='USER_ENTERED')
+            try:
+                self.ws.update(values=[[v]], range_name=cell, value_input_option='USER_ENTERED')
+            except Exception as e:
+                log_msg(f"Link update failed for {cell}: {e}")
             time.sleep(SHEET_WRITE_DELAY)
 
     def _highlight(self,row_idx,indices):
@@ -582,9 +509,26 @@ class Sheets:
         if reqs: self.ss.batch_update({"requests":reqs})
 
     def update_target_status(self,row,status,remarks):
-        self.target.update(values=[[status]], range_name=f"B{row}")
-        self.target.update(values=[[remarks]], range_name=f"C{row}")
-        time.sleep(SHEET_WRITE_DELAY)
+        # Use icons for status
+        if status.lower().startswith('pending'):
+            status = '⚡ Pending'
+        elif status.lower().startswith('done'):
+            status = 'Done 💀'
+        elif status.lower().startswith('error'):
+            status = 'Error 💥'
+        # API quota handling
+        for attempt in range(3):
+            try:
+                self.target.update(values=[[status]], range_name=f"B{row}")
+                self.target.update(values=[[remarks]], range_name=f"C{row}")
+                time.sleep(SHEET_WRITE_DELAY)
+                break
+            except APIError as e:
+                if '429' in str(e):
+                    log_msg('[API QUOTA] 429 error: Write quota exceeded, sleeping 60s...')
+                    time.sleep(60)
+                else:
+                    raise
 
     def update_dashboard(self, metrics:dict):
         try:
@@ -615,12 +559,14 @@ class Sheets:
                 status=row[1].strip()
                 lower=status.lower()
                 new_status=None
-                if ("pending" in lower) or ("⚡" in status):
-                    if status!="⚡ Pending": new_status="⚡ Pending"
-                elif ("done" in lower) or ("complete" in lower) or ("✅" in status):
-                    if status!="Done 💀": new_status="Done 💀"
+                if ("pending" in lower):
+                    if status != "⚡ Pending": new_status = "⚡ Pending"
+                elif ("done" in lower) or ("complete" in lower):
+                    if status != "Done 💀": new_status = "Done 💀"
+                elif ("error" in lower):
+                    if status != "Error 💥": new_status = "Error 💥"
                 elif status:
-                    new_status="⚡ Pending"
+                    new_status = "⚡ Pending"
                 if new_status:
                     updates.append((idx,new_status))
             for row_idx,val in updates:
@@ -647,26 +593,34 @@ class Sheets:
         key=nickname.lower(); ex=self.existing.get(key)
         if ex:
             before={COLUMN_ORDER[i]:(ex['data'][i] if i<len(ex['data']) else "") for i in range(len(COLUMN_ORDER))}
-            changed=[i for i,col in enumerate(COLUMN_ORDER) if col not in HIGHLIGHT_EXCLUDE_COLUMNS and (before.get(col,"") or "") != (vals[i] or "")]
-            self.ws.insert_row(vals,2); self._update_links(2, profile)
+            changed=[i for i,col in enumerate(COLUMN_ORDER) if col not in HIGHLIGHT_EXCLUDE_COLUMNS and (before.get(col,"" ) or "") != (vals[i] or "")]
+            # Update in place (overwrite row)
+            rownum=ex['row']
+            self.ws.update(values=[vals], range_name=f"A{rownum}:R{rownum}")
+            self._update_links(rownum, profile)
             if changed:
-                if ENABLE_CELL_HIGHLIGHT:
-                    self._highlight(2,changed)
-                self._add_notes(2,changed,before,vals)
-            try:
-                old=ex['row']+1 if ex['row']>=2 else 3; self.ws.delete_rows(old)
-            except Exception as e:
-                log_msg(f"Old row delete failed: {e}")
-            self.existing[key]={'row':2,'data':vals}
+                self._add_notes(rownum,changed,before,vals)
+            self.existing[key]={'row':rownum,'data':vals}
             status="updated" if changed else "unchanged"
             result={"status":status,"changed_fields":[COLUMN_ORDER[i] for i in changed]}
         else:
-            self.ws.insert_row(vals,2); self._update_links(2, profile); self.existing[key]={'row':2,'data':vals}
+            self.ws.append_row(vals); last_row=len(self.ws.get_all_values()); self._update_links(last_row, profile); self.existing[key]={'row':last_row,'data':vals}
             result={"status":"new","changed_fields":list(COLUMN_ORDER)}
         time.sleep(SHEET_WRITE_DELAY)
         return result
 
-# Target processing
+    def _add_notes(self,row_idx,indices,before,new_vals):
+        if not indices: return
+        note_lines = []
+        for idx in indices:
+            field = COLUMN_ORDER[idx]
+            note_lines.append(f"{field}: '{before.get(field, '')}' → '{new_vals[idx]}'")
+        note = "Changed fields:\n" + "\n".join(note_lines)
+        reqs=[{"updateCells":{"range":{"sheetId":self.ws.id,"startRowIndex":row_idx-1,"endRowIndex":row_idx,"startColumnIndex":0,"endColumnIndex":len(COLUMN_ORDER)},"rows":[{"values":[{"note":note} for _ in COLUMN_ORDER]}],"fields":"note"}}]
+        self.ss.batch_update({"requests":reqs})
+
+
+# ==================== TARGET PROCESSING ====================
 
 def get_pending_targets(sheets:Sheets):
     rows=sheets.target.get_all_values()[1:]
@@ -676,15 +630,17 @@ def get_pending_targets(sheets:Sheets):
         status=(row[1] if len(row)>1 else '').strip()
         source=(row[3] if len(row)>3 else 'Target').strip() or 'Target'
         norm=status.lower()
-        is_pending=(not status) or ("pending" in norm) or ("⚡" in status)
+        is_pending=(not status) or ("pending" in norm) or ("Pending" in status)
         if nick and is_pending:
             out.append({'nickname':nick,'row':idx,'source':source})
     return out
 
+# ==================== PROFILE SCRAPING ====================
+
 def scrape_profile(driver, nickname:str)->dict|None:
     url=f"https://damadam.pk/users/{nickname}/"
     try:
-        log_msg(f"📍 Scraping: {nickname}")
+        log_msg(f"[SCRAPING] {nickname}")
         driver.get(url)
         WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,"h1.cxl.clb.lsp")))
 
@@ -713,24 +669,69 @@ def scrape_profile(driver, nickname:str)->dict|None:
         }
 
         if suspend_reason:
-            data['STATUS']='Suspended'
-            data['INTRO']=f"Suspended: {suspend_reason}"[:250]
-            data['SUSPENSION_REASON']=suspend_reason
+            data['STATUS'] = 'Banned'
+            data['INTRO'] = f"Account Suspended: {suspend_reason}"[:250]
+            data['SUSPENSION_REASON'] = suspend_reason
+            data['__skip_reason'] = 'Account Suspended'
             return data
 
-
         if 'account suspended' in page_source.lower():
-            data['STATUS']="Suspended"
+            data['STATUS'] = 'Banned'
+            data['__skip_reason'] = 'Account Suspended'
+            return data
         elif 'background:tomato' in page_source or 'style="background:tomato"' in page_source.lower():
-            data['STATUS']="Unverified"
+            data['STATUS'] = 'Unverified'
+            data['__skip_reason'] = 'skipped coz of unverified user'
+            return data
         else:
             try:
-                driver.find_element(By.CSS_SELECTOR,"div[style*='tomato']")
-                data['STATUS']="Unverified"
+                driver.find_element(By.CSS_SELECTOR, "div[style*='tomato']")
+                data['STATUS'] = 'Unverified'
+                data['__skip_reason'] = 'skipped coz of unverified user'
+                return data
             except Exception:
-                data['STATUS']="Verified"
+                data['STATUS'] = 'Normal'
 
-        data['FRIEND']=get_friend_status(driver)
+        # Extract ID from tid
+        try:
+            tid_elem = driver.find_element(By.XPATH, "//input[@name='tid']")
+            data['ID'] = tid_elem.get_attribute('value').strip()
+        except Exception:
+            data['ID'] = ''
+
+        # Set POST URL
+        data['POST URL'] = f"https://damadam.pk/profile/public/{nickname}"
+
+        # Mehfil parsing
+        try:
+            mehfil_name = ''
+            mehfil_date = ''
+            # Find Mehfil name
+            mehfil_name_elem = driver.find_element(By.CSS_SELECTOR, ".cp.ow")
+            if mehfil_name_elem:
+                mehfil_name = mehfil_name_elem.text.strip()
+            # Find Mehfil date
+            mehfil_date_elem = driver.find_element(By.CSS_SELECTOR, ".cs.sp")
+            if mehfil_date_elem and 'owner since' in mehfil_date_elem.text:
+                mehfil_date = mehfil_date_elem.text.strip()
+            data['MEHFIL NAME'] = mehfil_name
+            data['MEHFIL DATE'] = mehfil_date
+        except Exception:
+            data['MEHFIL NAME'] = ''
+            data['MEHFIL DATE'] = ''
+
+        # Friend detection (button text)
+        try:
+            follow_btn = driver.find_element(By.XPATH, "//button/div/div[contains(text(), 'FOLLOW') or contains(text(), 'UNFOLLOW')]")
+            btn_text = follow_btn.text.strip().upper()
+            if 'UNFOLLOW' in btn_text:
+                data['FRIEND'] = 'Yes'
+            elif 'FOLLOW' in btn_text:
+                data['FRIEND'] = 'No'
+            else:
+                data['FRIEND'] = ''
+        except Exception:
+            data['FRIEND'] = ''
 
         for sel in ["span.cl.sp.lsp.nos","span.cl",".ow span.nos"]:
             try:
@@ -751,15 +752,20 @@ def scrape_profile(driver, nickname:str)->dict|None:
                     data[key]=convert_relative_date_to_absolute(value)
                 elif key=='GENDER':
                     low=value.lower()
-                    data[key]="💃" if low=='female' else "🕺" if low=='male' else value
+                    if 'female' in low:
+                        data[key] = 'Female'
+                    elif 'male' in low:
+                        data[key] = 'Male'
+                    else:
+                        data[key] = ''
                 elif key=='MARRIED':
                     low=value.lower()
                     if low in {'yes','married'}:
-                        data[key]="💍"
+                        data[key] = 'Yes'
                     elif low in {'no','single','unmarried'}:
-                        data[key]="❎"
+                        data[key] = 'No'
                     else:
-                        data[key]=value
+                        data[key] = ''
                 else:
                     data[key]=clean_data(value)
             except Exception:
@@ -801,95 +807,128 @@ def scrape_profile(driver, nickname:str)->dict|None:
             data['LAST POST']=clean_data(post_data.get('LPOST',''))
             data['LAST POST TIME']=post_data.get('LDATE-TIME','')
 
-        log_msg(f"✅ Extracted: {data['GENDER']}, {data['CITY']}, Posts: {data['POSTS']}")
+        log_msg(f"[OK] Extracted: {data['GENDER']}, {data['CITY']}, Posts: {data['POSTS']}")
         return data
     except TimeoutException:
-        log_msg(f"⚠️ Timeout while scraping {nickname}")
+        log_msg(f"[TIMEOUT] Timeout while scraping {nickname}")
         return None
     except WebDriverException:
-        log_msg(f"⚠️ Browser issue while scraping {nickname}")
+        log_msg(f"[BROWSER_ERROR] Browser issue while scraping {nickname}")
         return None
     except Exception as e:
-        log_msg(f"❌ Error scraping {nickname}: {str(e)[:60]}")
+        log_msg(f"[ERROR] Error scraping {nickname}: {str(e)[:60]}")
         return None
 
-# Main
+# ==================== MAIN ENTRY ====================
 
 def main():
-    print("\n"+"="*60); print("🎯 DamaDam Target Bot v3.2.1 (Single File)"); print("="*60)
-    if not USERNAME or not PASSWORD: print("❌ Missing DAMADAM_USERNAME / DAMADAM_PASSWORD"); sys.exit(1)
-    client=gsheets_client(); sheets=Sheets(client)
-    driver=setup_browser(); 
-    if not driver: print("❌ Browser setup failed"); sys.exit(1)
+    console.print("\n[bold magenta]DamaDam Target Bot v3.2.1[/bold magenta]", style="bold magenta")
+    console.print("[green]Automated DamaDam profile scraper for Google Sheets[/green]")
+    console.print("[cyan]---------------------------------------------[/cyan]")
+    # Welcome and options
     try:
-        if not login(driver): print("❌ Login failed"); driver.quit(); sys.exit(1)
+        batch_size = int(console.input("[yellow]Batch size (default 10): [/yellow]") or 10)
+    except Exception:
+        batch_size = 10
+    try:
+        max_profiles = int(console.input("[yellow]How many profiles to process? (default 50, 0=unlimited): [/yellow]") or 50)
+    except Exception:
+        max_profiles = 50
+    os.environ['BATCH_SIZE'] = str(batch_size)
+    os.environ['MAX_PROFILES_PER_RUN'] = str(max_profiles)
+    print("\n"+"="*70)
+    print("  [TARGET] DamaDam Target Bot v3.2.1 (Single File)")
+    print("="*70)
+    if not USERNAME or not PASSWORD: print("[ERROR] Missing DAMADAM_USERNAME / DAMADAM_PASSWORD"); sys.exit(1)
+    log_msg("Connecting to Google Sheets...")
+    client=gsheets_client(); sheets=Sheets(client)
+    log_msg("Setting up browser...")
+    driver=setup_browser(); 
+    if not driver: print("[ERROR] Browser setup failed"); sys.exit(1)
+    try:
+        log_msg("Logging in...")
+        if not login(driver): print("[ERROR] Login failed"); driver.quit(); sys.exit(1)
+        log_msg("Fetching pending targets...")
         targets=get_pending_targets(sheets)
-        if not targets: print("No pending targets."); return
-        if MAX_PROFILES_PER_RUN>0: targets=targets[:MAX_PROFILES_PER_RUN]
+        if not targets: log_msg("No pending targets."); return
+        # Enforce max profiles strictly
+        to_process = targets[:MAX_PROFILES_PER_RUN] if MAX_PROFILES_PER_RUN > 0 else targets
         success=failed=suspended_count=0
         run_stats={"new":0,"updated":0,"unchanged":0}
         start_time=time.time(); run_started=get_pkt_time()
         trigger_type="Scheduled" if os.getenv('GITHUB_EVENT_NAME','').lower()=='schedule' else "Manual"
         current_target=None
+        log_msg(f"Starting scrape of {len(to_process)} profiles...")
+        print("-"*70)
+        processed_count = 0
         try:
-            for i,t in enumerate(targets,1):
-                current_target=t
-                nick=t['nickname']; row=t['row']; source=t.get('source','Target') or 'Target'
-                eta=calculate_eta(i-1, len(targets), start_time)
-                log_msg(f"[{i}/{len(targets)} | ETA {eta}] {nick}")
+            i = 0
+            while processed_count < len(to_process):
+                t = to_process[processed_count]
+                current_target = t
+                nick = t['nickname']; row = t['row']; source = t.get('source','Target') or 'Target'
+                eta = calculate_eta(processed_count, len(to_process), start_time)
+                log_msg(f"[{processed_count+1:3d}/{len(to_process)} | ETA {eta:>8s}] {nick}")
                 try:
-                    prof=scrape_profile(driver, nick)
+                    prof = scrape_profile(driver, nick)
                     if not prof:
                         raise RuntimeError("Profile scrape failed")
-                    prof['SOURCE']=source
+                    prof['SOURCE'] = source
+                    # Ensure ID and FRIEND always present
+                    if 'ID' not in prof: prof['ID'] = ''
+                    if 'FRIEND' not in prof: prof['FRIEND'] = ''
                     if prof.get('SUSPENSION_REASON'):
                         sheets.write_profile(prof, old_row=row)
-                        reason=prof['SUSPENSION_REASON']
+                        reason = prof['SUSPENSION_REASON']
                         sheets.update_target_status(row, "Suspended", f"Suspended: {reason} @ {get_pkt_time().strftime('%I:%M %p')}")
-                        suspended_count+=1
-                        log_msg(f"⚠️ {nick} skipped (suspended: {reason})")
+                        suspended_count += 1
+                        log_msg(f"[SUSPENDED] {nick} skipped (suspended: {reason})")
                     else:
-                        result=sheets.write_profile(prof, old_row=row)
-                        status=result.get("status","error") if result else "error"
+                        result = sheets.write_profile(prof, old_row=row)
+                        status = result.get("status","error") if result else "error"
                         if status in {"new","updated","unchanged"}:
-                            success+=1
-                            run_stats[status]+=1
-                            changed_fields=result.get("changed_fields",[]) if result else []
-                            cleaned=[field for field in changed_fields if field not in HIGHLIGHT_EXCLUDE_COLUMNS]
-                            if status=="new":
-                                remark_detail="✨ New Profile added"
-                            elif status=="updated":
+                            success += 1
+                            run_stats[status] += 1
+                            changed_fields = result.get("changed_fields",[]) if result else []
+                            cleaned = [field for field in changed_fields if field not in HIGHLIGHT_EXCLUDE_COLUMNS]
+                            if status == "new":
+                                remark_detail = "[NEW] New Profile added"
+                            elif status == "updated":
                                 if cleaned:
-                                    trimmed=cleaned[:5]
-                                    if len(cleaned)>5: trimmed.append("…")
-                                    remark_detail=f"🔄 Updated: {', '.join(trimmed)}"
+                                    trimmed = cleaned[:5]
+                                    if len(cleaned)>5: trimmed.append("...")
+                                    remark_detail = f"[UPDATED] Updated: {', '.join(trimmed)}"
                                 else:
-                                    remark_detail="Updated (no key changes)"
+                                    remark_detail = "Updated (no key changes)"
                             else:
-                                remark_detail="No data changes"
-                            sheets.update_target_status(row, "Done 💀", f"{remark_detail} @ {get_pkt_time().strftime('%I:%M %p')}")
-                            log_msg(f"✅ {nick} {status}")
+                                remark_detail = "No data changes"
+                            sheets.update_target_status(row, "Done", f"{remark_detail} @ {get_pkt_time().strftime('%I:%M %p')}")
+                            log_msg(f"[OK] {nick} {status}")
                         else:
                             raise RuntimeError(result.get("error","Write failed") if result else "Write failed")
                 except Exception as e:
-                    sheets.update_target_status(row, "⚡ Pending", f"Retry needed: {e}")
-                    failed+=1
-                    log_msg(f"❌ {nick} failed: {e}")
-                current_target=None
-                if BATCH_SIZE>0 and i% BATCH_SIZE==0 and i<len(targets):
+                    sheets.update_target_status(row, "Pending", f"Retry needed: {e}")
+                    failed += 1
+                    log_msg(f"[FAIL] {nick} failed: {e}")
+                current_target = None
+                processed_count += 1
+                if BATCH_SIZE > 0 and processed_count % BATCH_SIZE == 0 and processed_count < len(to_process):
                     log_msg("Batch cool-off"); adaptive.on_batch(); time.sleep(3)
                 adaptive.sleep()
         except KeyboardInterrupt:
-            print("\n⚠️ Run interrupted by user")
+            print("\n" + "-"*70)
+            log_msg("Run interrupted by user")
             if current_target:
-                sheets.update_target_status(current_target['row'], "⚡ Pending", f"Interrupted @ {get_pkt_time().strftime('%I:%M %p')}")
+                sheets.update_target_status(current_target['row'], "Pending", f"Interrupted @ {get_pkt_time().strftime('%I:%M %p')}")
             return
         except Exception as fatal:
-            print(f"\n❌ Fatal error: {fatal}")
+            print("\n" + "-"*70)
+            log_msg(f"Fatal error: {fatal}")
             if current_target:
-                sheets.update_target_status(current_target['row'], "⚡ Pending", f"Run error: {fatal}")
+                sheets.update_target_status(current_target['row'], "Pending", f"Run error: {fatal}")
             return
-        print("\n✅ Done")
+        print("-"*70)
+        log_msg(f"[COMPLETE] Run completed: {success} success, {failed} failed, {suspended_count} suspended")
         sheets.update_dashboard({
             "Run Number":1,
             "Last Run": get_pkt_time().strftime("%d-%b-%y %I:%M %p"),
@@ -903,8 +942,7 @@ def main():
             "Start": run_started.strftime("%d-%b-%y %I:%M %p"),
             "End": get_pkt_time().strftime("%d-%b-%y %I:%M %p"),
         })
-        if suspended_count:
-            print(f"   ⚠️ Suspended skipped: {suspended_count}")
+        print("="*70)
     finally:
         try: driver.quit()
         except: pass

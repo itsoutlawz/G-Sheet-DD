@@ -1,10 +1,10 @@
-name: "DamDama Target Bot ✨"
+name: "DamaDam Target Bot"
 
 on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */1 * * *'   # Every 1 at HH:00
+    - cron: '0 */1 * * *'   # Run every 1 hour at minute 0 (HH:00)
   workflow_dispatch:
     inputs:
       max_profiles:
