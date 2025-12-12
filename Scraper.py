@@ -88,7 +88,7 @@ def _normalize_cred_path(p: str) -> str:
     return os.path.join(SCRIPT_DIR, p)
 
 MAX_PROFILES_PER_RUN = int(os.getenv('MAX_PROFILES_PER_RUN', '0'))
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', '10'))
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '20'))
 MIN_DELAY = float(os.getenv('MIN_DELAY', '0.3'))
 MAX_DELAY = float(os.getenv('MAX_DELAY', '0.5'))
 PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '30'))
@@ -752,7 +752,8 @@ def scrape_profile(driver, nickname:str)->dict|None:
 def main():
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--max-profiles", type=int, default=MAX_PROFILES_PER_RUN)
+    parser.add_argument("--max-profiles", type=int, default=MAX_PROFILES_PER_RUN, help="Max profiles to scrape (0 = all)")
+    parser.add_argument("--profiles-to-scrape", dest="max_profiles", type=int, default=MAX_PROFILES_PER_RUN, help="Alias for --max-profiles (0 = all)")
     args = parser.parse_args()
     os.environ['BATCH_SIZE'] = str(args.batch_size)
     os.environ['MAX_PROFILES_PER_RUN'] = str(args.max_profiles)
@@ -761,7 +762,7 @@ def main():
     header.add_column(justify="left")
     header.add_row("DamaDam Target Bot", "v3.2.1")
     header.add_row("Batch Size", str(args.batch_size))
-    header.add_row("Max Profiles", str(args.max_profiles))
+    header.add_row("Profiles", "All" if args.max_profiles == 0 else str(args.max_profiles))
     console.print(Panel(header, title="Run Config", border_style="magenta"))
     print("\n"+"="*70)
     print("  [TARGET] DamaDam Target Bot v3.2.1 (Single File)")
