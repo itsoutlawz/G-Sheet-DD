@@ -751,10 +751,27 @@ def scrape_profile(driver, nickname:str)->dict|None:
 
 def main():
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--max-profiles", type=int, default=MAX_PROFILES_PER_RUN, help="Max profiles to scrape (0 = all)")
-    parser.add_argument("--profiles-to-scrape", dest="max_profiles", type=int, default=MAX_PROFILES_PER_RUN, help="Alias for --max-profiles (0 = all)")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--max-profiles", type=int, default=None, help="Max profiles to scrape (0 = all)")
+    parser.add_argument("--profiles-to-scrape", dest="max_profiles", type=int, default=None, help="Alias for --max-profiles (0 = all)")
     args = parser.parse_args()
+
+    is_interactive = sys.stdin.isatty() and not os.getenv('GITHUB_ACTIONS')
+
+    if args.batch_size is None:
+        if is_interactive:
+            raw = input(f"Batch Size (default {BATCH_SIZE}): ").strip()
+            args.batch_size = int(raw) if raw else BATCH_SIZE
+        else:
+            args.batch_size = BATCH_SIZE
+
+    if args.max_profiles is None:
+        if is_interactive:
+            raw = input("Profiles to scrape (0=All, default 0): ").strip()
+            args.max_profiles = int(raw) if raw else 0
+        else:
+            args.max_profiles = MAX_PROFILES_PER_RUN
+
     os.environ['BATCH_SIZE'] = str(args.batch_size)
     os.environ['MAX_PROFILES_PER_RUN'] = str(args.max_profiles)
 
