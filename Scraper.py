@@ -343,34 +343,66 @@ def scrape_profile(driver, nickname:str)->dict|None:
         # Check for account status
         status, skip_reason = detect_status(page_source)
         data['STATUS'] = status
-        
-        if status != "Normal":
-            data['__skip_reason'] = skip_reason
-            return data
-            
-        # Extract TID (ID)
-        data['ID'] = extract_tid(page_source)
-        
-        # Extract friend status
-        data['FRIEND'] = get_friend_status(driver)
+def _normalize_cred_path(path):
+    """Normalize and expand the credentials file path."""
+    if not path:
+        return ""
+    path = path.strip('"\'')  # Remove any surrounding quotes
+    return os.path.abspath(os.path.expanduser(path))
 
-        if 'account suspended' in page_source.lower():
-            data['STATUS'] = 'Banned'
-            data['__skip_reason'] = 'Account Suspended'
-            return data
-        elif 'background:tomato' in page_source or 'style="background:tomato"' in page_source.lower():
-            data['STATUS'] = 'Unverified'
-            data['__skip_reason'] = 'skipped coz of unverified user'
-            return data
-        else:
+def gsheets_client():
+    """Initialize and return a Google Sheets API client with proper credentials."""
+    try:
+        # Get credentials from environment variables
+        creds = None
+        
+        # 1. Try to load from service account file
+        try:
+            creds_path = _normalize_cred_path(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''))
+            if creds_path and os.path.exists(creds_path):
+                creds = Credentials.from_service_account_file(
+                    creds_path,
+                    scopes=['https://www.googleapis.com/auth/spreadsheets']
+                )
+                log_msg("[INFO] Loaded credentials from service account file")
+        except Exception as e:
+            log_msg(f"[WARNING] Failed to load credentials from file: {str(e)[:100]}")
+        
+        # 2. Try to load from JSON string in environment variable
+        if not creds and 'GOOGLE_CREDENTIALS_JSON' in os.environ:
             try:
-                driver.find_element(By.CSS_SELECTOR, "div[style*='tomato']")
-                data['STATUS'] = 'Unverified'
-                data['__skip_reason'] = 'skipped coz of unverified user'
-                return data
-            except Exception:
-                data['STATUS'] = 'Normal'
-
+                import json
+                creds_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+                creds = Credentials.from_service_account_info(
+                    creds_info,
+                    scopes=['https://www.googleapis.com/auth/spreadsheets']
+                )
+                log_msg("[INFO] Loaded credentials from environment variable")
+            except Exception as e:
+                log_msg(f"[WARNING] Failed to parse credentials from env: {str(e)[:100]}")
+        
+        # 3. Try to load default credentials
+        if not creds:
+            try:
+                creds, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/spreadsheets'])
+                log_msg("[INFO] Using default application credentials")
+            except Exception as e:
+                log_msg(f"[WARNING] Failed to get default credentials: {str(e)[:100]}")
+        
+        if not creds:
+            raise Exception("""
+            No valid Google credentials found. Please set one of:
+            1. GOOGLE_APPLICATION_CREDENTIALS environment variable pointing to service account JSON file
+            2. GOOGLE_CREDENTIALS_JSON environment variable with service account JSON content
+            3. Configure default application credentials
+            """)
+        
+        # Create and return authorized client
+        return gspread.authorize(creds)
+        
+    except Exception as e:
+        log_msg(f"[ERROR] Failed to initialize Google Sheets client: {str(e)[:200]}")
+        raise
         # Extract ID from tid with HTML fallback
         if not data['ID']:
             try:
