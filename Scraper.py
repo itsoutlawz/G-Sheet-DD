@@ -98,7 +98,7 @@ PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '30'))
 SHEET_WRITE_DELAY = float(os.getenv('SHEET_WRITE_DELAY', '1.0'))
 
 COLUMN_ORDER = [
-    "ID", "NICK NAME", "TAGS", "FRIEND", "CITY", "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS", "POSTS", "INTRO", "MEHFIL NAME", "MEHFIL DATE", "SOURCE", "DATETIME SCRAP",
+    "NICK NAME", "TAGS", "CITY", "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS", "POSTS", "INTRO", "SOURCE", "DATETIME SCRAP",
     "LAST POST", "LAST POST TIME", "IMAGE", "PROFILE LINK", "POST URL"
 ]
 COLUMN_TO_INDEX = {name: idx for idx, name in enumerate(COLUMN_ORDER)}
@@ -233,12 +233,66 @@ def get_friend_status(driver) -> str:
         """
         // page ko lowercase karna safe matching ke liye zaroori
         """
+        try:
+            WebDriverWait(driver, 2).until(
+                EC.presence_of_element_located(
+                    (
+                        By.CSS_SELECTOR,
+                        "form[action*='/follow/remove/'], form[action*='/follow/add/'], img[src*='follow.svg'], img[src*='unfollow.svg'",
+                    )
+                )
+            )
+        except Exception:
+            pass
+
         page = driver.page_source.lower()
 
         """
         // text original hi chahiye because FOLLOW / UNFOLLOW uppercase hota hai
         """
         text = driver.page_source
+
+        try:
+            imgs = driver.find_elements(By.CSS_SELECTOR, "img[src*='follow.svg'], img[src*='unfollow.svg']")
+            has_unfollow_icon = False
+            has_follow_icon = False
+            for img in imgs:
+                src = (img.get_attribute('src') or '').lower()
+                if 'unfollow.svg' in src:
+                    has_unfollow_icon = True
+                elif re.search(r"(^|/)follow\.svg(\?|$)", src, re.IGNORECASE):
+                    has_follow_icon = True
+            if has_unfollow_icon:
+                return "Yes"
+            if has_follow_icon:
+                return "No"
+        except Exception:
+            pass
+
+        try:
+            forms = driver.find_elements(By.CSS_SELECTOR, "form[action*='/follow/remove/'], form[action*='/follow/add/']")
+            has_remove = False
+            has_add = False
+            has_unfollow_text = False
+            has_follow_text = False
+            for frm in forms:
+                action = (frm.get_attribute('action') or '').lower()
+                frm_text = (frm.text or '').lower()
+                if '/follow/remove/' in action or action.endswith('/follow/remove'):
+                    has_remove = True
+                if '/follow/add/' in action or action.endswith('/follow/add'):
+                    has_add = True
+                if 'unfollow' in frm_text:
+                    has_unfollow_text = True
+                if re.search(r"\bfollow\b", frm_text, re.IGNORECASE) and 'unfollow' not in frm_text:
+                    has_follow_text = True
+
+            if has_remove or has_unfollow_text:
+                return "Yes"
+            if has_add or has_follow_text:
+                return "No"
+        except Exception:
+            pass
 
         """
         // --- NOT FOLLOWING ---
@@ -260,10 +314,16 @@ def get_friend_status(driver) -> str:
         // --- FALLBACKS ---
         // Agar structure badal jaye lekin text same ho to bhi detection sahi chalegi
         """
-        if 'unfollow' in page or '/follow/remove/' in page:
+        if '/follow/remove/' in page:
             return "Yes"
 
-        if 'follow' in page or '/follow/add/' in page:
+        if '/follow/add/' in page:
+            return "No"
+
+        if re.search(r"\bunfollow\b", page, re.IGNORECASE):
+            return "Yes"
+
+        if re.search(r"\bfollow\b", page, re.IGNORECASE):
             return "No"
 
         return ""
@@ -450,6 +510,7 @@ class Sheets:
                 self.dashboard.clear(); self.dashboard.append_row(expected)
         except Exception as e:
             log_msg(f"Dashboard setup failed: {e}")
+        self._migrate_profiles_target_columns()
         self._load_existing(); self._load_tags_mapping(); self.normalize_target_statuses()
 
     def apply_quantico_font(self):
@@ -492,14 +553,57 @@ class Sheets:
             log_msg(f"{name} sheet not found, skipping optional features")
             return None
 
+    def _migrate_profiles_target_columns(self):
+        try:
+            headers = self.ws.row_values(1)
+            if not headers:
+                return
+            to_remove = {"ID", "FRIEND", "MEHFIL NAME", "MEHFIL DATE"}
+            if not any(h in to_remove for h in headers):
+                return
+
+            idxs = []
+            for name in to_remove:
+                try:
+                    idxs.append(headers.index(name))
+                except ValueError:
+                    pass
+            if not idxs:
+                return
+
+            reqs = []
+            for idx in sorted(set(idxs), reverse=True):
+                reqs.append(
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": self.ws.id,
+                                "dimension": "COLUMNS",
+                                "startIndex": idx,
+                                "endIndex": idx + 1,
+                            }
+                        }
+                    }
+                )
+            self.ss.batch_update({"requests": reqs})
+
+            end_col_letter = column_letter(len(COLUMN_ORDER)-1)
+            self.ws.update(values=[COLUMN_ORDER], range_name=f"A1:{end_col_letter}1")
+            time.sleep(SHEET_WRITE_DELAY)
+            log_msg("ProfilesTarget columns migrated (removed ID/FRIEND/MEHFIL)")
+        except Exception as e:
+            log_msg(f"ProfilesTarget migration failed: {e}")
+
     def _format(self):
         pass  # Formatting disabled as per user request
 
     def _load_existing(self):
         self.existing={}
         rows=self.ws.get_all_values()[1:]
+        nick_idx = COLUMN_TO_INDEX.get("NICK NAME", 0)
         for i,r in enumerate(rows,start=2):
-            if len(r)>1 and r[1].strip(): self.existing[r[1].strip().lower()]={'row':i,'data':r}
+            if len(r) > nick_idx and r[nick_idx].strip():
+                self.existing[r[nick_idx].strip().lower()]={'row':i,'data':r}
         log_msg(f"Loaded {len(self.existing)} existing")
 
     def _load_tags_mapping(self):
@@ -668,10 +772,8 @@ def scrape_profile(driver, nickname:str)->dict|None:
         now=get_pkt_time()
         suspend_reason=detect_suspension_reason(page_source)
         data={
-            "ID":"",
             "NICK NAME":nickname,
             "TAGS":"",
-            "FRIEND":"",
             "CITY":"",
             "GENDER":"",
             "MARRIED":"",
@@ -681,8 +783,6 @@ def scrape_profile(driver, nickname:str)->dict|None:
             "STATUS":"Normal",
             "POSTS":"",
             "INTRO":"",
-            "MEHFIL NAME":"",
-            "MEHFIL DATE":"",
             "SOURCE":"Target",
             "DATETIME SCRAP":now.strftime("%d-%b-%y %I:%M %p"),
             "LAST POST":"",
@@ -702,7 +802,11 @@ def scrape_profile(driver, nickname:str)->dict|None:
             data['STATUS'] = 'Banned'
             data['__skip_reason'] = 'Account Suspended'
             return data
-        elif 'background:tomato' in page_source or 'style="background:tomato"' in page_source.lower():
+        elif (
+            re.search(r">\s*unverified\s*user\s*<", page_source, re.IGNORECASE)
+            or 'background:tomato' in page_source
+            or 'style="background:tomato"' in page_source.lower()
+        ):
             data['STATUS'] = 'Unverified'
             data['__skip_reason'] = 'skipped coz of unverified user'
             return data
@@ -714,54 +818,6 @@ def scrape_profile(driver, nickname:str)->dict|None:
                 return data
             except Exception:
                 data['STATUS'] = 'Normal'
-
-        # Extract ID from tid (HTML fallback required)
-        try:
-            tid_elem = driver.find_element(By.XPATH, "//input[@name='tid']")
-            data['ID'] = (tid_elem.get_attribute('value') or '').strip()
-        except Exception:
-            tid_match = re.search(r'name=["\']tid["\']\s+value=["\'](\d+)["\']', page_source, re.I)
-            data['ID'] = tid_match.group(1) if tid_match else ''
-
-        data['FRIEND'] = get_friend_status(driver)
-
-        # Mehfil (group) detection (support multiple)
-        try:
-            if "mehfil(s) owned" in page_source.lower():
-                names: list[str] = []
-                dates: list[str] = []
-
-                # Prefer Selenium for reliability
-                try:
-                    name_els = driver.find_elements(By.CSS_SELECTOR, "div.cp.ow")
-                    since_els = driver.find_elements(By.CSS_SELECTOR, "div.cs.sp")
-                    for i, name_el in enumerate(name_els):
-                        nm = clean_text(name_el.text)
-                        if nm:
-                            names.append(nm)
-                            since_txt = since_els[i].text if i < len(since_els) else ""
-                            dt = parse_owner_since_to_date(since_txt)
-                            dates.append(dt)
-                except Exception:
-                    pass
-
-                # HTML fallback: capture multiple pairs
-                if not names:
-                    for m in re.finditer(
-                        r'<div class="cp ow"[^>]*>(.*?)</div>\s*<div class="cs sp"[^>]*>(.*?)</div>',
-                        page_source,
-                        flags=re.IGNORECASE | re.DOTALL,
-                    ):
-                        nm = clean_text(re.sub(r"<[^>]+>", "", m.group(1)))
-                        dt = parse_owner_since_to_date(clean_text(re.sub(r"<[^>]+>", "", m.group(2))))
-                        if nm:
-                            names.append(nm)
-                            dates.append(dt)
-
-                data["MEHFIL NAME"] = ", ".join([n for n in names if n])
-                data["MEHFIL DATE"] = ", ".join([d for d in dates if d])
-        except Exception:
-            pass
 
         for sel in ["span.cl.sp.lsp.nos","span.cl",".ow span.nos"]:
             try:
@@ -837,7 +893,7 @@ def scrape_profile(driver, nickname:str)->dict|None:
             data['LAST POST']=clean_data(post_data.get('LPOST',''))
             data['LAST POST TIME']=post_data.get('LDATE-TIME','')
 
-        log_msg(f"[OK] Extracted: {data['GENDER']}, {data['CITY']}, Posts: {data['POSTS']}")
+        log_msg(f"[OK] Extracted: {data['GENDER']}, {data['CITY']}, Posts: {data['POSTS']}, Friend: {data.get('FRIEND','')}")
 
         return data
     except TimeoutException:
