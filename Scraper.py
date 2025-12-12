@@ -46,6 +46,17 @@ from rich.text import Text
 colorama_init(autoreset=True)
 console = Console()
 
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
+import gspread
+from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound, APIError
+
 LOGIN_URL = "https://damadam.pk/login/"
 HOME_URL = "https://damadam.pk/"
 COOKIE_FILE = "damadam_cookies.pkl"
@@ -66,14 +77,13 @@ PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '30'))
 SHEET_WRITE_DELAY = float(os.getenv('SHEET_WRITE_DELAY', '1.0'))
 
 COLUMN_ORDER = [
-    "ID", "NICK NAME", "TAGS", "FRIEND", "CITY", "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS", "POSTS", "INTRO", "SOURCE", "DATETIME SCRAP",
+    "ID", "NICK NAME", "TAGS", "FRIEND", "CITY", "GENDER", "MARRIED", "AGE", "JOINED", "FOLLOWERS", "STATUS", "POSTS", "INTRO", "MEHFIL NAME", "MEHFIL DATE", "SOURCE", "DATETIME SCRAP",
     "LAST POST", "LAST POST TIME", "IMAGE", "PROFILE LINK", "POST URL"
 ]
 COLUMN_TO_INDEX = {name: idx for idx, name in enumerate(COLUMN_ORDER)}
 COLUMN_TLOG_HEADERS = ["Timestamp", "Nickname", "Change Type", "Fields", "Before", "After"]
 DASHBOARD_SHEET_NAME = "Dashboard"
 HIGHLIGHT_EXCLUDE_COLUMNS = {"LAST POST", "LAST POST TIME", "JOINED", "PROFILE LINK", "DATETIME SCRAP"}
-LINK_COLUMNS = {"IMAGE", "LAST POST", "PROFILE LINK"}
 SUSPENSION_INDICATORS = [
     "accounts suspend",
     "aik se zyada fake accounts",
@@ -149,14 +159,12 @@ def clean_text(text:str)->str:
 def parse_post_timestamp(text:str)->str:
     return convert_relative_date_to_absolute(text)
 
-def to_absolute_url(href:str)->str:
-    if not href: return ""
-    href=href.strip()
-    if href.startswith('/'):
-        return f"https://damadam.pk{href}"
-    if not href.startswith('http'):
-        return f"https://damadam.pk/{href}"
-    return href
+def parse_owner_since_to_date(text:str)->str:
+    text = text.strip()
+    if "since" in text.lower():
+        text = text.split("since")[1].strip()
+        return convert_relative_date_to_absolute(text)
+    return ""
 
 def get_friend_status(driver) -> str:
     try:
@@ -199,18 +207,6 @@ def get_friend_status(driver) -> str:
     except Exception:
         return ""
 
-def extract_text_comment_url(href:str)->str:
-    m=re.search(r'/comments/text/(\d+)/', href or '')
-    if m:
-        return to_absolute_url(f"/comments/text/{m.group(1)}/").rstrip('/')
-    return to_absolute_url(href or '')
-
-def extract_image_comment_url(href:str)->str:
-    m=re.search(r'/comments/image/(\d+)/', href or '')
-    if m:
-        return to_absolute_url(f"/content/{m.group(1)}/g/")
-    return to_absolute_url(href or '')
-
 def scrape_recent_post(driver, nickname:str)->dict:
     post_url=f"https://damadam.pk/profile/public/{nickname}"
     try:
@@ -224,9 +220,9 @@ def scrape_recent_post(driver, nickname:str)->dict:
         post_data={'LPOST':'','LDATE-TIME':''}
 
         url_selectors=[
-            ("a[href*='/content/']", lambda h: to_absolute_url(h)),
-            ("a[href*='/comments/text/']", extract_text_comment_url),
-            ("a[href*='/comments/image/']", extract_image_comment_url)
+            ("a[href*='/content/']", lambda h: h),
+            ("a[href*='/comments/text/']", lambda h: h),
+            ("a[href*='/comments/image/']", lambda h: h)
         ]
         for selector, formatter in url_selectors:
             try:
@@ -451,35 +447,6 @@ class Sheets:
         except Exception as e:
             log_msg(f"Tags load failed: {e}")
 
-    def _clean_url(self, url):
-        if not url or not isinstance(url, str):
-            return url
-        # Convert /content/.../g/ to /comments/image/...
-        if '/content/' in url and '/g/' in url:
-            try:
-                # Extract the ID
-                id_part = url.split('/content/')[-1].split('/')[0]
-                return f'https://damadam.pk/comments/image/{id_part}'
-            except (IndexError, AttributeError):
-                return url
-        return url
-
-    def _update_links(self,row_idx,data):
-        for col in LINK_COLUMNS:
-            v = data.get(col)
-            if not v:
-                continue
-            # Clean the URL if it's an image URL
-            if col == 'LAST POST' and '/content/' in str(v) and '/g/' in str(v):
-                v = self._clean_url(v)
-            c=COLUMN_TO_INDEX[col]; cell=f"{column_letter(c)}{row_idx}"
-            # Store raw URL instead of formula
-            try:
-                self.ws.update(values=[[v]], range_name=cell, value_input_option='USER_ENTERED')
-            except Exception as e:
-                log_msg(f"Link update failed for {cell}: {e}")
-            time.sleep(SHEET_WRITE_DELAY)
-
     def _highlight(self,row_idx,indices):
         for idx in indices:
             rng=f"{column_letter(idx)}{row_idx}:{column_letter(idx)}{row_idx}"; self.ws.format(rng,{"backgroundColor":{"red":1.0,"green":0.93,"blue":0.85}}); time.sleep(SHEET_WRITE_DELAY)
@@ -592,17 +559,6 @@ class Sheets:
         time.sleep(SHEET_WRITE_DELAY)
         return result
 
-    def _add_notes(self,row_idx,indices,before,new_vals):
-        if not indices: return
-        note_lines = []
-        for idx in indices:
-            field = COLUMN_ORDER[idx]
-            note_lines.append(f"{field}: '{before.get(field, '')}' → '{new_vals[idx]}'")
-        note = "Changed fields:\n" + "\n".join(note_lines)
-        reqs=[{"updateCells":{"range":{"sheetId":self.ws.id,"startRowIndex":row_idx-1,"endRowIndex":row_idx,"startColumnIndex":0,"endColumnIndex":len(COLUMN_ORDER)},"rows":[{"values":[{"note":note} for _ in COLUMN_ORDER]}],"fields":"note"}}]
-        self.ss.batch_update({"requests":reqs})
-
-
 # ==================== TARGET PROCESSING ====================
 
 def get_pending_targets(sheets:Sheets):
@@ -613,7 +569,7 @@ def get_pending_targets(sheets:Sheets):
         status=(row[1] if len(row)>1 else '').strip()
         source=(row[3] if len(row)>3 else 'Target').strip() or 'Target'
         norm=status.lower()
-        is_pending=(not status) or ("pending" in norm) or ("Pending" in status)
+        is_pending=(not status) or (status == TARGET_STATUS_PENDING) or ("pending" in norm)
         if nick and is_pending:
             out.append({'nickname':nick,'row':idx,'source':source})
     return out
@@ -631,11 +587,9 @@ def scrape_profile(driver, nickname:str)->dict|None:
         now=get_pkt_time()
         suspend_reason=detect_suspension_reason(page_source)
         data={
-            "IMAGE":"",
+            "ID":"",
             "NICK NAME":nickname,
             "TAGS":"",
-            "LAST POST":"",
-            "LAST POST TIME":"",
             "FRIEND":"",
             "CITY":"",
             "GENDER":"",
@@ -643,18 +597,23 @@ def scrape_profile(driver, nickname:str)->dict|None:
             "AGE":"",
             "JOINED":"",
             "FOLLOWERS":"",
-            "STATUS":"",
+            "STATUS":"Normal",
             "POSTS":"",
-            "PROFILE LINK":url.rstrip('/'),
             "INTRO":"",
+            "MEHFIL NAME":"",
+            "MEHFIL DATE":"",
             "SOURCE":"Target",
-            "DATETIME SCRAP":now.strftime("%d-%b-%y %I:%M %p")
+            "DATETIME SCRAP":now.strftime("%d-%b-%y %I:%M %p"),
+            "LAST POST":"",
+            "LAST POST TIME":"",
+            "IMAGE":"",
+            "PROFILE LINK":url.rstrip('/'),
+            "POST URL":f"https://damadam.pk/profile/public/{nickname}",
         }
 
         if suspend_reason:
             data['STATUS'] = 'Banned'
-            data['INTRO'] = f"Account Suspended: {suspend_reason}"[:250]
-            data['SUSPENSION_REASON'] = suspend_reason
+            data['INTRO'] = "Account Suspended"[:250]
             data['__skip_reason'] = 'Account Suspended'
             return data
 
@@ -682,39 +641,17 @@ def scrape_profile(driver, nickname:str)->dict|None:
         except Exception:
             data['ID'] = ''
 
-        # Set POST URL
-        data['POST URL'] = f"https://damadam.pk/profile/public/{nickname}"
+        data['FRIEND'] = get_friend_status(driver)
 
-        # Mehfil parsing
+        # Mehfil (group) detection
         try:
-            mehfil_name = ''
-            mehfil_date = ''
-            # Find Mehfil name
-            mehfil_name_elem = driver.find_element(By.CSS_SELECTOR, ".cp.ow")
-            if mehfil_name_elem:
-                mehfil_name = mehfil_name_elem.text.strip()
-            # Find Mehfil date
-            mehfil_date_elem = driver.find_element(By.CSS_SELECTOR, ".cs.sp")
-            if mehfil_date_elem and 'owner since' in mehfil_date_elem.text:
-                mehfil_date = mehfil_date_elem.text.strip()
-            data['MEHFIL NAME'] = mehfil_name
-            data['MEHFIL DATE'] = mehfil_date
+            if "mehfil(s) owned" in page_source.lower():
+                name_el = driver.find_element(By.CSS_SELECTOR, "div.cp.ow")
+                since_el = driver.find_element(By.CSS_SELECTOR, "div.cs.sp")
+                data["MEHFIL NAME"] = clean_text(name_el.text)
+                data["MEHFIL DATE"] = parse_owner_since_to_date(since_el.text)
         except Exception:
-            data['MEHFIL NAME'] = ''
-            data['MEHFIL DATE'] = ''
-
-        # Friend detection (button text)
-        try:
-            follow_btn = driver.find_element(By.XPATH, "//button/div/div[contains(text(), 'FOLLOW') or contains(text(), 'UNFOLLOW')]")
-            btn_text = follow_btn.text.strip().upper()
-            if 'UNFOLLOW' in btn_text:
-                data['FRIEND'] = 'Yes'
-            elif 'FOLLOW' in btn_text:
-                data['FRIEND'] = 'No'
-            else:
-                data['FRIEND'] = ''
-        except Exception:
-            data['FRIEND'] = ''
+            pass
 
         for sel in ["span.cl.sp.lsp.nos","span.cl",".ow span.nos"]:
             try:
@@ -791,6 +728,7 @@ def scrape_profile(driver, nickname:str)->dict|None:
             data['LAST POST TIME']=post_data.get('LDATE-TIME','')
 
         log_msg(f"[OK] Extracted: {data['GENDER']}, {data['CITY']}, Posts: {data['POSTS']}")
+
         return data
     except TimeoutException:
         log_msg(f"[TIMEOUT] Timeout while scraping {nickname}")
@@ -805,20 +743,19 @@ def scrape_profile(driver, nickname:str)->dict|None:
 # ==================== MAIN ENTRY ====================
 
 def main():
-    console.print("\n[bold magenta]DamaDam Target Bot v3.2.1[/bold magenta]", style="bold magenta")
-    console.print("[green]Automated DamaDam profile scraper for Google Sheets[/green]")
-    console.print("[cyan]---------------------------------------------[/cyan]")
-    # Welcome and options
-    try:
-        batch_size = int(console.input("[yellow]Batch size (default 10): [/yellow]") or 10)
-    except Exception:
-        batch_size = 10
-    try:
-        max_profiles = int(console.input("[yellow]How many profiles to process? (default 50, 0=unlimited): [/yellow]") or 50)
-    except Exception:
-        max_profiles = 50
-    os.environ['BATCH_SIZE'] = str(batch_size)
-    os.environ['MAX_PROFILES_PER_RUN'] = str(max_profiles)
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--max-profiles", type=int, default=MAX_PROFILES_PER_RUN)
+    args = parser.parse_args()
+    os.environ['BATCH_SIZE'] = str(args.batch_size)
+    os.environ['MAX_PROFILES_PER_RUN'] = str(args.max_profiles)
+
+    header = Table.grid(padding=(0, 2))
+    header.add_column(justify="left")
+    header.add_row("DamaDam Target Bot", "v3.2.1")
+    header.add_row("Batch Size", str(args.batch_size))
+    header.add_row("Max Profiles", str(args.max_profiles))
+    console.print(Panel(header, title="Run Config", border_style="magenta"))
     print("\n"+"="*70)
     print("  [TARGET] DamaDam Target Bot v3.2.1 (Single File)")
     print("="*70)
@@ -835,75 +772,65 @@ def main():
         targets=get_pending_targets(sheets)
         if not targets: log_msg("No pending targets."); return
         # Enforce max profiles strictly
-        to_process = targets[:MAX_PROFILES_PER_RUN] if MAX_PROFILES_PER_RUN > 0 else targets
+        to_process = targets[:args.max_profiles] if args.max_profiles > 0 else targets
         success=failed=suspended_count=0
         run_stats={"new":0,"updated":0,"unchanged":0}
         start_time=time.time(); run_started=get_pkt_time()
         trigger_type="Scheduled" if os.getenv('GITHUB_EVENT_NAME','').lower()=='schedule' else "Manual"
         current_target=None
         log_msg(f"Starting scrape of {len(to_process)} profiles...")
-        print("-"*70)
         processed_count = 0
         try:
-            i = 0
-            while processed_count < len(to_process):
-                t = to_process[processed_count]
-                current_target = t
-                nick = t['nickname']; row = t['row']; source = t.get('source','Target') or 'Target'
-                eta = calculate_eta(processed_count, len(to_process), start_time)
-                log_msg(f"[{processed_count+1:3d}/{len(to_process)} | ETA {eta:>8s}] {nick}")
-                try:
-                    prof = scrape_profile(driver, nick)
-                    if not prof:
-                        raise RuntimeError("Profile scrape failed")
-                    prof['SOURCE'] = source
-                    # Ensure ID and FRIEND always present
-                    if 'ID' not in prof: prof['ID'] = ''
-                    if 'FRIEND' not in prof: prof['FRIEND'] = ''
-                    if prof.get('SUSPENSION_REASON'):
-                        sheets.write_profile(prof, old_row=row)
-                        reason = prof['SUSPENSION_REASON']
-                        sheets.update_target_status(row, "Suspended", f"Suspended: {reason} @ {get_pkt_time().strftime('%I:%M %p')}")
-                        suspended_count += 1
-                        log_msg(f"[SUSPENDED] {nick} skipped (suspended: {reason})")
-                    else:
-                        result = sheets.write_profile(prof, old_row=row)
-                        status = result.get("status","error") if result else "error"
-                        if status in {"new","updated","unchanged"}:
-                            success += 1
-                            run_stats[status] += 1
-                            changed_fields = result.get("changed_fields",[]) if result else []
-                            cleaned = [field for field in changed_fields if field not in HIGHLIGHT_EXCLUDE_COLUMNS]
-                            if status == "new":
-                                remark_detail = "[NEW] New Profile added"
-                            elif status == "updated":
-                                if cleaned:
-                                    trimmed = cleaned[:5]
-                                    if len(cleaned)>5: trimmed.append("...")
-                                    remark_detail = f"[UPDATED] Updated: {', '.join(trimmed)}"
-                                else:
-                                    remark_detail = "Updated (no key changes)"
-                            else:
-                                remark_detail = "No data changes"
-                            sheets.update_target_status(row, "Done", f"{remark_detail} @ {get_pkt_time().strftime('%I:%M %p')}")
-                            log_msg(f"[OK] {nick} {status}")
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("{task.description}"),
+                BarColumn(bar_width=30),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                task_id = progress.add_task("Scraping profiles", total=len(to_process))
+                while processed_count < len(to_process):
+                    t = to_process[processed_count]
+                    current_target = t
+                    nick = t['nickname']; row = t['row']; source = t.get('source','Target') or 'Target'
+                    eta = calculate_eta(processed_count, len(to_process), start_time)
+                    progress.update(task_id, description=f"[{eta}] {nick}")
+                    try:
+                        prof = scrape_profile(driver, nick)
+                        if not prof:
+                            raise RuntimeError("Profile scrape failed")
+                        prof['SOURCE'] = source
+
+                        skip_reason = prof.get('__skip_reason')
+                        if skip_reason:
+                            sheets.write_profile(prof, old_row=row)
+                            sheets.update_target_status(row, "Error", f"{skip_reason} @ {get_pkt_time().strftime('%I:%M %p')}")
+                            failed += 1
                         else:
-                            raise RuntimeError(result.get("error","Write failed") if result else "Write failed")
-                except Exception as e:
-                    sheets.update_target_status(row, "Pending", f"Retry needed: {e}")
-                    failed += 1
-                    log_msg(f"[FAIL] {nick} failed: {e}")
-                current_target = None
-                processed_count += 1
-                if BATCH_SIZE > 0 and processed_count % BATCH_SIZE == 0 and processed_count < len(to_process):
-                    log_msg("Batch cool-off"); adaptive.on_batch(); time.sleep(3)
-                adaptive.sleep()
+                            result = sheets.write_profile(prof, old_row=row)
+                            status = result.get("status","error") if result else "error"
+                            if status in {"new","updated","unchanged"}:
+                                success += 1
+                                run_stats[status] += 1
+                                sheets.update_target_status(row, "Done", f"{status} @ {get_pkt_time().strftime('%I:%M %p')}")
+                            else:
+                                raise RuntimeError(result.get("error","Write failed") if result else "Write failed")
+                    except Exception as e:
+                        sheets.update_target_status(row, "Pending", f"Retry needed: {e}")
+                        failed += 1
+                    current_target = None
+                    processed_count += 1
+                    progress.advance(task_id)
+                    if args.batch_size > 0 and processed_count % args.batch_size == 0 and processed_count < len(to_process):
+                        adaptive.on_batch(); time.sleep(3)
+                    adaptive.sleep()
         except KeyboardInterrupt:
             print("\n" + "-"*70)
             log_msg("Run interrupted by user")
             if current_target:
                 sheets.update_target_status(current_target['row'], "Pending", f"Interrupted @ {get_pkt_time().strftime('%I:%M %p')}")
-            return
         except Exception as fatal:
             print("\n" + "-"*70)
             log_msg(f"Fatal error: {fatal}")
